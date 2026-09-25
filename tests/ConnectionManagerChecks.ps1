@@ -7,8 +7,10 @@ $ErrorActionPreference = 'Stop'
 $resolvedRepo = [IO.Path]::GetFullPath($RepoRoot)
 $sourcePath = Join-Path $resolvedRepo 'src\ConnectionManagerUi.cs'
 $commonPath = Join-Path $resolvedRepo 'src\Common.cs'
+$visualsPath = Join-Path $resolvedRepo 'src\SetupVisuals.cs'
 if (-not [IO.File]::Exists($sourcePath) -or
-    -not [IO.File]::Exists($commonPath)) {
+    -not [IO.File]::Exists($commonPath) -or
+    -not [IO.File]::Exists($visualsPath)) {
     throw 'Connection-manager source files were not found.'
 }
 
@@ -25,7 +27,9 @@ $requiredContracts = @(
     'credential fields are intentionally omitted',
     'Nothing is sent automatically',
     'RepairShortcutRequested',
-    'CloseSetupAfterConnect'
+    'CloseSetupAfterConnect',
+    'Connect with a different account once...',
+    '--prompt-credentials'
 )
 foreach ($contract in $requiredContracts) {
     if ($source.IndexOf($contract, [StringComparison]::Ordinal) -lt 0) {
@@ -79,6 +83,7 @@ try {
         '/reference:System.Windows.Forms.dll',
         "/out:$compileOutput",
         $commonPath,
+        $visualsPath,
         $sourcePath
     )
     & $compiler $compilerArguments
@@ -264,8 +269,54 @@ try {
     $unrelated = Join-Path $profilesRoot 'keep-this-folder'
     [IO.Directory]::CreateDirectory($unrelated) | Out-Null
     [IO.File]::WriteAllText((Join-Path $unrelated 'keep.txt'), 'keep')
+
+    $savedSettingsBytes = [IO.File]::ReadAllBytes($duplicateSettings)
+    [IO.File]::Delete($duplicateSettings)
+    [IO.Directory]::CreateDirectory($duplicateSettings) | Out-Null
+    $allowedNameDirectoryRejected = $false
+    try {
+        [object[]]$directoryDeleteArguments = @(
+            [string]$profilesRoot, [string]$duplicateId)
+        $delete.Invoke($null, $directoryDeleteArguments) | Out-Null
+    }
+    catch {
+        if ($_.Exception.InnerException -is [IO.IOException]) {
+            $allowedNameDirectoryRejected = $true
+        }
+        else {
+            throw
+        }
+    }
+    if (-not $allowedNameDirectoryRejected -or
+        -not [IO.File]::Exists($duplicateRdp)) {
+        throw 'Profile deletion accepted a directory using an app-owned filename.'
+    }
+    [IO.Directory]::Delete($duplicateSettings, $false)
+    [IO.File]::WriteAllBytes($duplicateSettings, $savedSettingsBytes)
+
+    $unknownProfileFile = Join-Path $duplicateDirectory 'user-note.txt'
+    [IO.File]::WriteAllText($unknownProfileFile, 'review me')
     [object[]]$deleteArguments = @(
         [string]$profilesRoot, [string]$duplicateId)
+    $unknownDeleteRejected = $false
+    try {
+        $delete.Invoke($null, $deleteArguments) | Out-Null
+    }
+    catch {
+        if ($_.Exception.InnerException -is [IO.IOException]) {
+            $unknownDeleteRejected = $true
+        }
+        else {
+            throw
+        }
+    }
+    if (-not $unknownDeleteRejected -or
+        -not [IO.File]::Exists($unknownProfileFile) -or
+        -not [IO.File]::Exists($duplicateRdp) -or
+        -not [IO.File]::Exists($duplicateSettings)) {
+        throw 'Profile deletion removed files before rejecting an unknown item.'
+    }
+    [IO.File]::Delete($unknownProfileFile)
     $delete.Invoke($null, $deleteArguments) | Out-Null
     if ([IO.Directory]::Exists($duplicateDirectory) -or
         -not [IO.Directory]::Exists($profileDirectory) -or

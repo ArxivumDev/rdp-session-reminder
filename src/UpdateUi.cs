@@ -325,14 +325,21 @@ internal sealed class UpdatePageController
 
                 try
                 {
-                    UpdateClient.VerifyAgainBeforeLaunch(prepared);
-                    ProcessStartInfo startInfo = new ProcessStartInfo();
-                    startInfo.FileName = prepared.InstallerPath;
-                    startInfo.Arguments = prepared.GetInstallerArguments(
-                        Process.GetCurrentProcess().Id);
-                    startInfo.WorkingDirectory = prepared.TemporaryDirectory;
-                    startInfo.UseShellExecute = true;
-                    Process.Start(startInfo);
+                    using (VerifiedUpdateLaunch launch =
+                        UpdateClient.OpenVerifiedInstallerForLaunch(prepared))
+                    {
+                        ProcessStartInfo startInfo = new ProcessStartInfo();
+                        startInfo.FileName = launch.InstallerPath;
+                        startInfo.Arguments = prepared.GetInstallerArguments(
+                            Process.GetCurrentProcess().Id);
+                        startInfo.WorkingDirectory = launch.WorkingDirectory;
+                        startInfo.UseShellExecute = false;
+                        Process installerProcess = Process.Start(startInfo);
+                        if (installerProcess == null)
+                            throw new InvalidOperationException(
+                                "Windows did not start the verified installer.");
+                        installerProcess.Dispose();
+                    }
                     owner.Close();
                 }
                 catch (Exception exception)

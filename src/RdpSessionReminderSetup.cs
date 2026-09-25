@@ -19,8 +19,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("RDP Session Reminder contributors")]
 [assembly: AssemblyProduct("RDP Session Reminder")]
 [assembly: AssemblyCopyright("Copyright (c) 2026")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 internal static class SetupProgram
 {
@@ -148,6 +148,9 @@ internal static class SetupProgram
                 !generatedContent.Contains("redirectcomports:i:1") ||
                 !generatedContent.Contains("redirectwebauthn:i:1") ||
                 !generatedContent.Contains("redirectsmartcards:i:1") ||
+                !generatedContent.Contains("devicestoredirect:s:") ||
+                !generatedContent.Contains("camerastoredirect:s:") ||
+                !generatedContent.Contains("usbdevicestoredirect:s:") ||
                 !generatedContent.Contains("redirectclipboard:i:1") ||
                 generatedContent.Contains("signscope:s:"))
                 return 29;
@@ -202,31 +205,58 @@ internal sealed class SetupForm : Form
     private readonly CheckBox fullScreenCheck;
     private readonly ComboBox resolutionCombo;
     private readonly CheckBox allMonitorsCheck;
-    private readonly CheckBox alwaysAskCredentialsCheck;
     private readonly CheckBox redirectClipboardCheck;
     private readonly CheckBox redirectDrivesCheck;
     private readonly CheckBox redirectLocationCheck;
     private readonly CheckBox redirectComPortsCheck;
     private readonly CheckBox redirectWebAuthnCheck;
     private readonly CheckBox redirectSmartCardsCheck;
+    private readonly CheckBox redirectPrintersCheck;
+    private readonly CheckBox redirectMicrophoneCheck;
+    private readonly Button previewImportButton;
+    private readonly Button chooseMonitorsButton;
+    private readonly Label monitorSummary;
+    private readonly ComboBox shortcutIconCombo;
     private readonly CheckBox trustPublisherCheck;
     private readonly Label publisherTrustStatus;
     private readonly Button removePublisherTrustButton;
     private readonly TabControl tabs;
     private readonly Button connectButton;
+    private readonly Button oneTimeButton;
     private readonly Button cancelButton;
+    private readonly Button previousButton;
+    private readonly Button nextButton;
+    private readonly ComboBox themeCombo;
+    private readonly Label workflowSummary;
+    private readonly Label association;
+    private readonly Label privacy;
     private readonly Label operationStatus;
     private readonly ProgressBar operationProgress;
     private readonly UpdatePageController updateController;
+    private readonly BannerSetupPage bannerSetupPage;
+    private readonly ConnectionManagerController connectionManager;
+    private MonitorSelection monitorSelection;
     private bool updatingShortcut;
     private bool updatingReminder;
     private bool shortcutManuallyEdited;
     private bool reminderManuallyEdited;
     private bool operationRunning;
     private bool allowClose;
+    private bool changingTheme;
+    private bool systemPreferenceSubscribed;
+    private readonly string themePreferencePath;
 
     public SetupForm()
+        : this(null)
     {
+    }
+
+    internal SetupForm(string preferencePath)
+    {
+        themePreferencePath = preferencePath;
+        SetupPalette.SetTheme(string.IsNullOrEmpty(themePreferencePath)
+            ? UiPreferenceStore.Load()
+            : UiPreferenceStore.LoadFrom(themePreferencePath));
         Text = "RDP Session Reminder Setup";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -238,6 +268,7 @@ internal sealed class SetupForm : Form
         Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
+        BackColor = SetupPalette.Canvas;
 
         try
         {
@@ -247,42 +278,68 @@ internal sealed class SetupForm : Form
         {
         }
 
-        Label title = new Label();
-        title.AutoSize = false;
-        title.Location = new Point(28, 22);
-        title.Size = new Size(604, 38);
-        title.Font = new Font("Segoe UI Semibold", 17f, FontStyle.Bold);
-        title.Text = "RDP Session Reminder";
-        Controls.Add(title);
+        SetupHeroPanel hero = new SetupHeroPanel();
+        hero.Location = new Point(20, 12);
+        hero.Size = new Size(620, 69);
+        Controls.Add(hero);
 
-        Label introduction = new Label();
-        introduction.AutoSize = false;
-        introduction.Location = new Point(30, 66);
-        introduction.Size = new Size(595, 42);
-        introduction.Text =
-            "Create a guided Remote Desktop profile and its reminder shortcut, or " +
-            "use an existing .rdp file unchanged.";
-        Controls.Add(introduction);
+        Label themeLabel = new Label();
+        themeLabel.AutoSize = true;
+        themeLabel.Location = new Point(496, 7);
+        themeLabel.Font = new Font("Segoe UI Semibold", 8.25f,
+            FontStyle.Bold);
+        themeLabel.Text = "Appearance";
+        hero.Controls.Add(themeLabel);
 
-        tabs = new TabControl();
-        tabs.Location = new Point(25, 116);
+        themeCombo = new ComboBox();
+        themeCombo.AccessibleName = "Appearance theme";
+        themeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        themeCombo.Location = new Point(493, 27);
+        themeCombo.Size = new Size(108, 25);
+        themeCombo.Items.Add("Dark");
+        themeCombo.Items.Add("Light");
+        changingTheme = true;
+        themeCombo.SelectedIndex = SetupPalette.RequestedTheme ==
+            UiThemeMode.Light ? 1 : 0;
+        changingTheme = false;
+        themeCombo.SelectedIndexChanged += ThemeSelectionChanged;
+        hero.Controls.Add(themeCombo);
+
+        workflowSummary = new Label();
+        workflowSummary.AutoSize = false;
+        workflowSummary.Location = new Point(30, 88);
+        workflowSummary.Size = new Size(595, 30);
+        workflowSummary.Font = new Font("Segoe UI Semibold", 9.5f,
+            FontStyle.Bold);
+        workflowSummary.ForeColor = SetupPalette.MutedInk;
+        Controls.Add(workflowSummary);
+
+        tabs = new GuidedTabControl();
+        tabs.Location = new Point(25, 122);
         tabs.Size = new Size(610, 424);
         tabs.TabIndex = 0;
         Controls.Add(tabs);
 
-        TabPage connectionTab = new TabPage("Connection");
+        TabPage connectionTab = new TabPage("1. Connection");
         connectionTab.Padding = new Padding(12);
+        connectionTab.BackColor = SetupPalette.Surface;
+        connectionTab.UseVisualStyleBackColor = false;
         tabs.TabPages.Add(connectionTab);
 
-        TabPage displayTab = new TabPage("Display");
+        TabPage displayTab = new TabPage("2. Displays");
         displayTab.Padding = new Padding(12);
+        displayTab.BackColor = SetupPalette.Surface;
+        displayTab.UseVisualStyleBackColor = false;
         tabs.TabPages.Add(displayTab);
 
-        TabPage resourcesTab = new TabPage("Local resources && trust");
+        TabPage resourcesTab = new TabPage("3. Resources");
         resourcesTab.Padding = new Padding(12);
+        resourcesTab.BackColor = SetupPalette.Surface;
+        resourcesTab.UseVisualStyleBackColor = false;
         tabs.TabPages.Add(resourcesTab);
 
-        updateController = UpdateUi.Attach(this, tabs);
+        bannerSetupPage = new BannerSetupPage(this, tabs);
+        connectionManager = AttachConnectionManager();
 
         Label computerLabel = new Label();
         computerLabel.AutoSize = true;
@@ -301,22 +358,32 @@ internal sealed class SetupForm : Form
         Label rdpFileLabel = new Label();
         rdpFileLabel.AutoSize = true;
         rdpFileLabel.Location = new Point(18, 80);
-        rdpFileLabel.Text = "Existing RDP connection file (optional)";
+        rdpFileLabel.Text =
+            "Import an existing RDP connection file (optional, less common)";
         connectionTab.Controls.Add(rdpFileLabel);
 
         rdpFileText = new TextBox();
         rdpFileText.Location = new Point(21, 104);
-        rdpFileText.Size = new Size(455, 25);
+        rdpFileText.Size = new Size(360, 25);
         rdpFileText.TabIndex = 1;
         connectionTab.Controls.Add(rdpFileText);
 
         Button browseButton = new Button();
-        browseButton.Location = new Point(484, 102);
+        browseButton.Location = new Point(389, 102);
         browseButton.Size = new Size(87, 29);
         browseButton.Text = "Browse...";
         browseButton.TabIndex = 2;
         browseButton.Click += BrowseForRdpFile;
         connectionTab.Controls.Add(browseButton);
+
+        previewImportButton = new Button();
+        previewImportButton.Location = new Point(484, 102);
+        previewImportButton.Size = new Size(87, 29);
+        previewImportButton.Text = "Preview...";
+        previewImportButton.TabIndex = 3;
+        previewImportButton.Enabled = false;
+        previewImportButton.Click += PreviewRdpFile;
+        connectionTab.Controls.Add(previewImportButton);
 
         Label fileModeHelp = new Label();
         fileModeHelp.AutoSize = false;
@@ -324,8 +391,8 @@ internal sealed class SetupForm : Form
         fileModeHelp.Size = new Size(550, 36);
         fileModeHelp.ForeColor = Color.FromArgb(80, 80, 80);
         fileModeHelp.Text =
-            "Selecting a file copies it byte-for-byte. Custom display, resource, and " +
-            "publisher settings below apply only when this field is empty.";
+            "Recommended: leave this empty for guided settings. If you select a file, " +
+            "Preview shows its requests first and the original stays unchanged.";
         connectionTab.Controls.Add(fileModeHelp);
 
         Label displayLabel = new Label();
@@ -341,11 +408,12 @@ internal sealed class SetupForm : Form
         displayCombo.TabIndex = 0;
         displayTab.Controls.Add(displayCombo);
 
-        foreach (Screen screen in Screen.AllScreens)
+        foreach (MonitorDescriptor monitor in
+            new ScreenMonitorTopologySource().GetMonitors())
         {
-            DisplayChoice choice = new DisplayChoice(screen);
+            DisplayChoice choice = new DisplayChoice(monitor);
             int itemIndex = displayCombo.Items.Add(choice);
-            if (screen.Primary)
+            if (monitor.IsPrimary)
                 displayCombo.SelectedIndex = itemIndex;
         }
         if (displayCombo.SelectedIndex < 0 && displayCombo.Items.Count > 0)
@@ -353,15 +421,15 @@ internal sealed class SetupForm : Form
 
         Label reminderLabel = new Label();
         reminderLabel.AutoSize = true;
-        reminderLabel.Location = new Point(18, 184);
+        reminderLabel.Location = new Point(18, 176);
         reminderLabel.Text = "Reminder text";
         connectionTab.Controls.Add(reminderLabel);
 
         reminderText = new TextBox();
-        reminderText.Location = new Point(21, 208);
+        reminderText.Location = new Point(21, 200);
         reminderText.Size = new Size(550, 25);
         reminderText.MaxLength = 100;
-        reminderText.TabIndex = 3;
+        reminderText.TabIndex = 4;
         reminderText.TextChanged += delegate
         {
             if (!updatingReminder)
@@ -371,15 +439,16 @@ internal sealed class SetupForm : Form
 
         Label shortcutLabel = new Label();
         shortcutLabel.AutoSize = true;
-        shortcutLabel.Location = new Point(18, 247);
-        shortcutLabel.Text = "Desktop shortcut name";
+        shortcutLabel.Location = new Point(18, 235);
+        shortcutLabel.Text =
+            "Desktop shortcut name (for a reusable connection)";
         connectionTab.Controls.Add(shortcutLabel);
 
         shortcutText = new TextBox();
-        shortcutText.Location = new Point(21, 271);
+        shortcutText.Location = new Point(21, 259);
         shortcutText.Size = new Size(550, 25);
         shortcutText.MaxLength = 80;
-        shortcutText.TabIndex = 4;
+        shortcutText.TabIndex = 5;
         shortcutText.TextChanged += delegate
         {
             if (!updatingShortcut)
@@ -387,14 +456,49 @@ internal sealed class SetupForm : Form
         };
         connectionTab.Controls.Add(shortcutText);
 
-        alwaysAskCredentialsCheck = new CheckBox();
-        alwaysAskCredentialsCheck.AutoSize = true;
-        alwaysAskCredentialsCheck.Location = new Point(21, 311);
-        alwaysAskCredentialsCheck.Text =
-            "Always ask for credentials (allows a different user name)";
-        alwaysAskCredentialsCheck.Checked = true;
-        alwaysAskCredentialsCheck.TabIndex = 5;
-        connectionTab.Controls.Add(alwaysAskCredentialsCheck);
+        Label iconLabel = new Label();
+        iconLabel.AutoSize = true;
+        iconLabel.Location = new Point(18, 294);
+        iconLabel.Text = "Desktop shortcut icon (for a reusable connection)";
+        connectionTab.Controls.Add(iconLabel);
+
+        shortcutIconCombo = new ComboBox();
+        shortcutIconCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        shortcutIconCombo.Location = new Point(21, 318);
+        shortcutIconCombo.Size = new Size(550, 25);
+        shortcutIconCombo.TabIndex = 6;
+        foreach (ShortcutIconChoice iconChoice in ShortcutIconCatalog.GetChoices())
+            shortcutIconCombo.Items.Add(iconChoice);
+        if (shortcutIconCombo.Items.Count > 0)
+            shortcutIconCombo.SelectedIndex = 0;
+        connectionTab.Controls.Add(shortcutIconCombo);
+
+        Label shortcutIconHelp = new Label();
+        shortcutIconHelp.AutoSize = false;
+        shortcutIconHelp.Location = new Point(21, 346);
+        shortcutIconHelp.Size = new Size(550, 20);
+        shortcutIconHelp.ForeColor = SetupPalette.MutedInk;
+        shortcutIconCombo.SelectedIndexChanged += delegate
+        {
+            ShortcutIconChoice selected =
+                shortcutIconCombo.SelectedItem as ShortcutIconChoice;
+            shortcutIconHelp.Text = selected == null ? "" :
+                selected.Description;
+        };
+        connectionTab.Controls.Add(shortcutIconHelp);
+        if (shortcutIconCombo.SelectedItem != null)
+            shortcutIconHelp.Text = ((ShortcutIconChoice)
+                shortcutIconCombo.SelectedItem).Description;
+
+        Label signInHelp = new Label();
+        signInHelp.AutoSize = false;
+        signInHelp.Location = new Point(21, 369);
+        signInHelp.Size = new Size(550, 20);
+        signInHelp.Font = new Font("Segoe UI", 8.25f);
+        signInHelp.ForeColor = SetupPalette.MutedInk;
+        signInHelp.Text =
+            "Sign-in: Windows uses a saved account when available; otherwise it prompts.";
+        connectionTab.Controls.Add(signInHelp);
 
         fullScreenCheck = new CheckBox();
         fullScreenCheck.AutoSize = true;
@@ -429,17 +533,35 @@ internal sealed class SetupForm : Form
         allMonitorsCheck.TabIndex = 3;
         allMonitorsCheck.CheckedChanged += delegate
         {
+            if (allMonitorsCheck.Checked)
+                monitorSelection = null;
             UpdateCustomOptionState();
+            UpdateMonitorSummary();
         };
         displayTab.Controls.Add(allMonitorsCheck);
 
+        chooseMonitorsButton = new Button();
+        chooseMonitorsButton.Location = new Point(21, 220);
+        chooseMonitorsButton.Size = new Size(190, 30);
+        chooseMonitorsButton.Text = "Choose specific monitors...";
+        chooseMonitorsButton.TabIndex = 4;
+        chooseMonitorsButton.Click += ChooseSpecificMonitors;
+        displayTab.Controls.Add(chooseMonitorsButton);
+
+        monitorSummary = new Label();
+        monitorSummary.AutoSize = false;
+        monitorSummary.Location = new Point(224, 222);
+        monitorSummary.Size = new Size(347, 36);
+        monitorSummary.ForeColor = Color.FromArgb(70, 70, 70);
+        displayTab.Controls.Add(monitorSummary);
+
         Label displayDefaults = new Label();
         displayDefaults.AutoSize = false;
-        displayDefaults.Location = new Point(21, 229);
-        displayDefaults.Size = new Size(550, 95);
+        displayDefaults.Location = new Point(21, 270);
+        displayDefaults.Size = new Size(550, 100);
         displayDefaults.ForeColor = Color.FromArgb(70, 70, 70);
         displayDefaults.Text =
-            "Generated profiles always use highest color quality (32 bit), show the " +
+            "Generated profiles use the recommended highest color quality (32 bit), show the " +
             "full-screen connection bar, send Windows key combinations only in full " +
             "screen, play remote audio on this PC, detect connection quality, keep a " +
             "persistent bitmap cache, reconnect after drops, and warn if server " +
@@ -450,60 +572,74 @@ internal sealed class SetupForm : Form
         Label resourcesLabel = new Label();
         resourcesLabel.AutoSize = true;
         resourcesLabel.Location = new Point(18, 18);
-        resourcesLabel.Text = "Resources available inside the remote session";
+        resourcesLabel.Text =
+            "Resources available remotely (recommended defaults are preselected)";
         resourcesTab.Controls.Add(resourcesLabel);
 
         redirectClipboardCheck = CreateResourceCheckBox(
             resourcesTab, "Clipboard", 21, 49, true, 0);
         redirectDrivesCheck = CreateResourceCheckBox(
             resourcesTab, "All local drives", 300, 49, false, 1);
-        redirectLocationCheck = CreateResourceCheckBox(
-            resourcesTab, "Location", 21, 82, false, 2);
-        redirectComPortsCheck = CreateResourceCheckBox(
-            resourcesTab, "Serial and COM ports", 300, 82, false, 3);
+        redirectPrintersCheck = CreateResourceCheckBox(
+            resourcesTab, "Printers", 21, 82, false, 2);
+        redirectMicrophoneCheck = CreateResourceCheckBox(
+            resourcesTab, "Microphone", 300, 82, false, 3);
         redirectWebAuthnCheck = CreateResourceCheckBox(
             resourcesTab,
-            "WebAuthn (Windows Hello for Business and security keys)",
+            "WebAuthn passkeys and security keys",
             21, 115, true, 4);
+
+        GroupBox lessCommonResources = new GroupBox();
+        lessCommonResources.Location = new Point(21, 145);
+        lessCommonResources.Size = new Size(550, 72);
+        lessCommonResources.Text = "Less common resources";
+        lessCommonResources.ForeColor = SetupPalette.MutedInk;
+        resourcesTab.Controls.Add(lessCommonResources);
+
+        redirectLocationCheck = CreateResourceCheckBox(
+            lessCommonResources, "Location", 12, 23, false, 5);
+        redirectComPortsCheck = CreateResourceCheckBox(
+            lessCommonResources, "Serial and COM ports", 180, 23, false, 6);
         redirectSmartCardsCheck = CreateResourceCheckBox(
-            resourcesTab, "Smart cards", 21, 148, false, 5);
+            lessCommonResources, "Smart cards or Windows Hello for Business",
+            12, 46, false, 7);
 
         Label trustHeading = new Label();
         trustHeading.AutoSize = true;
         trustHeading.Font = new Font(Font, FontStyle.Bold);
-        trustHeading.Location = new Point(18, 196);
-        trustHeading.Text = "Optional RDP publisher trust";
+        trustHeading.Location = new Point(18, 226);
+        trustHeading.Text = "Optional RDP publisher trust (less common)";
         resourcesTab.Controls.Add(trustHeading);
 
         trustPublisherCheck = new CheckBox();
         trustPublisherCheck.AutoSize = false;
-        trustPublisherCheck.Location = new Point(21, 225);
+        trustPublisherCheck.Location = new Point(21, 249);
         trustPublisherCheck.Size = new Size(550, 44);
         trustPublisherCheck.Text =
             "Create or reuse a private, non-exportable certificate on this Windows " +
             "account, trust that RDP publisher for this user, and sign this generated profile";
         trustPublisherCheck.Checked = false;
-        trustPublisherCheck.TabIndex = 6;
+        trustPublisherCheck.TabIndex = 8;
         resourcesTab.Controls.Add(trustPublisherCheck);
 
         publisherTrustStatus = new Label();
         publisherTrustStatus.AutoSize = false;
-        publisherTrustStatus.Location = new Point(21, 277);
+        publisherTrustStatus.Location = new Point(21, 296);
         publisherTrustStatus.Size = new Size(550, 39);
         publisherTrustStatus.ForeColor = Color.FromArgb(75, 75, 75);
         resourcesTab.Controls.Add(publisherTrustStatus);
 
         removePublisherTrustButton = new Button();
-        removePublisherTrustButton.Location = new Point(21, 322);
+        removePublisherTrustButton.Location = new Point(21, 337);
         removePublisherTrustButton.Size = new Size(250, 30);
         removePublisherTrustButton.Text = "Remove and verify publisher trust";
-        removePublisherTrustButton.TabIndex = 7;
+        removePublisherTrustButton.TabIndex = 9;
         removePublisherTrustButton.Click += RemovePublisherTrust;
         resourcesTab.Controls.Add(removePublisherTrustButton);
 
         Label trustExplanation = new Label();
         trustExplanation.AutoSize = false;
-        trustExplanation.Location = new Point(286, 320);
+        trustExplanation.Location = new Point(286, 335);
         trustExplanation.Size = new Size(285, 51);
         trustExplanation.ForeColor = Color.FromArgb(80, 80, 80);
         trustExplanation.Text =
@@ -512,22 +648,29 @@ internal sealed class SetupForm : Form
         resourcesTab.Controls.Add(trustExplanation);
 
         rdpFileText.TextChanged += RdpFileTextChanged;
+        updateController = UpdateUi.Attach(this, tabs);
+        foreach (TabPage page in tabs.TabPages)
+        {
+            page.BackColor = SetupPalette.Surface;
+            page.UseVisualStyleBackColor = false;
+        }
         UpdatePublisherTrustStatus();
         UpdateCustomOptionState();
+        UpdateMonitorSummary();
 
-        Label association = new Label();
+        association = new Label();
         association.AutoSize = false;
-        association.Location = new Point(30, 550);
+        association.Location = new Point(30, 554);
         association.Size = new Size(595, 38);
         association.ForeColor = Color.FromArgb(70, 70, 70);
         association.Text =
-            "This creates a separate shortcut for this connection only. Other RDP " +
-            "files and shortcuts are not changed.";
+            "Create a reusable shortcut, or choose Connect once for a temporary " +
+            "profile with no shortcut.";
         Controls.Add(association);
 
-        Label privacy = new Label();
+        privacy = new Label();
         privacy.AutoSize = false;
-        privacy.Location = new Point(30, 590);
+        privacy.Location = new Point(30, 594);
         privacy.Size = new Size(595, 30);
         privacy.ForeColor = Color.FromArgb(80, 80, 80);
         privacy.Text =
@@ -551,26 +694,214 @@ internal sealed class SetupForm : Form
         operationProgress.Visible = false;
         Controls.Add(operationProgress);
 
-        connectButton = new Button();
-        connectButton.Location = new Point(430, 686);
-        connectButton.Size = new Size(128, 30);
-        connectButton.Text = "Create && Connect";
+        connectButton = new DimensionalButton(true);
+        connectButton.Text = "Create shortcut and connect";
+        connectButton.Size = new Size(172, 30);
+        connectButton.Location = new Point(386, 686);
         connectButton.TabIndex = 1;
         connectButton.Click += SaveAndConnect;
         Controls.Add(connectButton);
         AcceptButton = connectButton;
 
-        cancelButton = new Button();
+        oneTimeButton = new DimensionalButton(false);
+        oneTimeButton.Location = new Point(248, 686);
+        oneTimeButton.Size = new Size(128, 30);
+        oneTimeButton.Text = "Connect once";
+        oneTimeButton.TabIndex = 2;
+        oneTimeButton.Click += SaveAndConnectOnce;
+        Controls.Add(oneTimeButton);
+
+        cancelButton = new DimensionalButton(false);
         cancelButton.Location = new Point(566, 686);
         cancelButton.Size = new Size(67, 30);
         cancelButton.Text = "Cancel";
-        cancelButton.TabIndex = 2;
+        cancelButton.TabIndex = 3;
         cancelButton.DialogResult = DialogResult.Cancel;
+        cancelButton.Click += delegate
+        {
+            if (!operationRunning)
+            {
+                allowClose = true;
+                Close();
+            }
+        };
         Controls.Add(cancelButton);
         CancelButton = cancelButton;
 
+        previousButton = new DimensionalButton(false);
+        previousButton.Location = new Point(30, 686);
+        previousButton.Size = new Size(86, 30);
+        previousButton.Text = "< Back";
+        previousButton.TabIndex = 4;
+        previousButton.Click += PreviousStep;
+        Controls.Add(previousButton);
+
+        nextButton = new DimensionalButton(true);
+        nextButton.Location = new Point(124, 686);
+        nextButton.Size = new Size(116, 30);
+        nextButton.Text = "Next >";
+        nextButton.TabIndex = 5;
+        nextButton.Click += NextStep;
+        Controls.Add(nextButton);
+
+        tabs.SelectedIndexChanged += WorkflowPageChanged;
+        tabs.SelectedIndex = connectionManager.HasConnections ? 4 : 0;
+        UpdateWorkflowNavigation();
+        SetupVisualTheme.Apply(this);
+
         Shown += FitToCurrentWorkingArea;
         FormClosing += SetupFormClosing;
+        SystemEvents.UserPreferenceChanged += SystemUserPreferenceChanged;
+        systemPreferenceSubscribed = true;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && systemPreferenceSubscribed)
+        {
+            SystemEvents.UserPreferenceChanged -= SystemUserPreferenceChanged;
+            systemPreferenceSubscribed = false;
+        }
+        base.Dispose(disposing);
+    }
+
+    protected override void OnSystemColorsChanged(EventArgs eventArgs)
+    {
+        base.OnSystemColorsChanged(eventArgs);
+        if (!IsDisposed && !Disposing && Controls.Count > 0)
+            RefreshForSystemPreferences();
+    }
+
+    private void SystemUserPreferenceChanged(object sender,
+        UserPreferenceChangedEventArgs eventArgs)
+    {
+        if (!systemPreferenceSubscribed || IsDisposed || Disposing ||
+            !IsHandleCreated)
+            return;
+
+        try
+        {
+            if (InvokeRequired)
+                BeginInvoke((MethodInvoker)RefreshForSystemPreferences);
+            else
+                RefreshForSystemPreferences();
+        }
+        catch (InvalidOperationException)
+        {
+            // The window can close while Windows is delivering the event.
+        }
+    }
+
+    internal void RefreshForSystemPreferences()
+    {
+        if (IsDisposed || Disposing)
+            return;
+        SetupVisualTheme.Apply(this);
+    }
+
+    private void ThemeSelectionChanged(object sender, EventArgs eventArgs)
+    {
+        if (changingTheme || themeCombo.SelectedIndex < 0)
+            return;
+
+        UiThemeMode selected = themeCombo.SelectedIndex == 1
+            ? UiThemeMode.Light
+            : UiThemeMode.Dark;
+        SetupPalette.SetTheme(selected);
+        SetupVisualTheme.Apply(this);
+        try
+        {
+            if (string.IsNullOrEmpty(themePreferencePath))
+                UiPreferenceStore.Save(selected);
+            else
+                UiPreferenceStore.SaveTo(themePreferencePath, selected);
+        }
+        catch
+        {
+            // The selected theme still applies for this setup session. A future
+            // launch falls back to the safe dark default if the preference
+            // cannot be written.
+        }
+    }
+
+    private void PreviousStep(object sender, EventArgs eventArgs)
+    {
+        if (!operationRunning && tabs.SelectedIndex > 0 &&
+            tabs.SelectedIndex < 4)
+            tabs.SelectedIndex--;
+    }
+
+    private void NextStep(object sender, EventArgs eventArgs)
+    {
+        if (!operationRunning && tabs.SelectedIndex >= 0 &&
+            tabs.SelectedIndex < 3)
+            tabs.SelectedIndex++;
+    }
+
+    private void WorkflowPageChanged(object sender, EventArgs eventArgs)
+    {
+        UpdateWorkflowNavigation();
+    }
+
+    private void UpdateWorkflowNavigation()
+    {
+        int pageIndex = tabs.SelectedIndex;
+        bool workflowPage = pageIndex >= 0 && pageIndex < 4;
+        bool finalStep = pageIndex == 3;
+
+        previousButton.Visible = workflowPage;
+        previousButton.Enabled = workflowPage && pageIndex > 0;
+        nextButton.Visible = workflowPage && !finalStep;
+        connectButton.Visible = workflowPage && finalStep;
+        oneTimeButton.Visible = workflowPage && finalStep;
+        privacy.Visible = workflowPage;
+        cancelButton.Text = workflowPage ? "Cancel" : "Close";
+
+        if (workflowPage)
+        {
+            string[] summaries = new string[]
+            {
+                "Step 1 of 4 - Choose the computer. Recommended values fill in as you type.",
+                "Step 2 of 4 - Choose displays. The primary screen and full screen are recommended.",
+                "Step 3 of 4 - Choose resources. Security-conscious defaults are already selected.",
+                "Step 4 of 4 - Review the reminder style, then create the connection."
+            };
+            workflowSummary.Text = summaries[pageIndex];
+            nextButton.Text = pageIndex == 0
+                ? "Next: Displays >"
+                : pageIndex == 1
+                    ? "Next: Resources >"
+                    : "Next: Reminder >";
+            association.Text = finalStep
+                ? "Create a reusable shortcut, or choose Connect once for a " +
+                    "temporary profile with no shortcut."
+                : "Recommended choices are already selected. Continue through " +
+                    "the steps, or select a numbered step above.";
+            association.Visible = true;
+            AcceptButton = finalStep ? connectButton : nextButton;
+        }
+        else
+        {
+            bool savedConnections = pageIndex == 4;
+            workflowSummary.Text = savedConnections
+                ? "Saved connections - Connect, customize, duplicate, repair, or diagnose app-created profiles."
+                : "Updates - Check the official release channel and review changes before installing.";
+            association.Text =
+                "Configuration only: closing this window ends the setup app and its memory use.";
+            association.Visible = true;
+            AcceptButton = null;
+        }
+    }
+
+    private void FocusWorkflowControl(int pageIndex, Control control,
+        bool selectAll)
+    {
+        if (pageIndex >= 0 && pageIndex < tabs.TabPages.Count)
+            tabs.SelectedIndex = pageIndex;
+        control.Focus();
+        TextBox textBox = control as TextBox;
+        if (selectAll && textBox != null)
+            textBox.SelectAll();
     }
 
     private void FitToCurrentWorkingArea(object sender, EventArgs eventArgs)
@@ -587,6 +918,207 @@ internal sealed class SetupForm : Form
         Location = new Point(
             Math.Max(workingArea.Left, Math.Min(Left, maximumLeft)),
             Math.Max(workingArea.Top, Math.Min(Top, maximumTop)));
+    }
+
+    private ConnectionManagerController AttachConnectionManager()
+    {
+        ConnectionManagerOptions options = new ConnectionManagerOptions();
+        options.RuntimePath = AppPaths.RuntimePath;
+        options.CloseSetupAfterConnect = true;
+        options.EditRequested = EditManagedConnection;
+        options.DuplicateCreated = delegate(ManagedConnectionInfo profile)
+        {
+            RepairManagedShortcut(profile.ProfileId);
+        };
+        options.RepairShortcutRequested = delegate(ManagedConnectionInfo profile)
+        {
+            RepairManagedShortcut(profile.ProfileId);
+        };
+        options.ProfileDeleted = RemoveOwnedDesktopShortcut;
+        options.DiagnosticsContextProvider = BuildDiagnosticsContext;
+        return ConnectionManagerUi.Attach(this, tabs, options);
+    }
+
+    private void EditManagedConnection(ManagedConnectionInfo profile)
+    {
+        if (profile == null)
+            return;
+        using (ManagedProfileEditorForm editor =
+            new ManagedProfileEditorForm(profile.ProfileId))
+        {
+            if (editor.ShowDialog(this) == DialogResult.OK)
+                connectionManager.RefreshProfiles();
+        }
+    }
+
+    internal static string RepairManagedShortcut(string profileId)
+    {
+        ReminderSettings settings;
+        if (!SettingsStore.TryLoadProfile(profileId, out settings))
+            throw new InvalidDataException(
+                "The connection settings are missing or invalid.");
+        if (!File.Exists(AppPaths.GetProfileConnectionPath(profileId)))
+            throw new FileNotFoundException(
+                "The connection's private RDP file is missing.");
+
+        InstallApplicationFiles();
+        string desktop = Environment.GetFolderPath(
+            Environment.SpecialFolder.DesktopDirectory);
+        string expectedPath = Path.Combine(desktop,
+            settings.ShortcutName + ".lnk");
+        string arguments = "--profile " + profileId;
+        string shortcutPath = expectedPath;
+        if (File.Exists(expectedPath) &&
+            !IsOwnedShortcut(expectedPath, profileId))
+        {
+            shortcutPath = ShortcutPathHelper.ReserveUniquePath(
+                desktop, settings.ShortcutName);
+            settings.ShortcutName =
+                Path.GetFileNameWithoutExtension(shortcutPath);
+            SettingsStore.SaveTo(
+                AppPaths.GetProfileSettingsPath(profileId), settings);
+        }
+
+        ShortcutWriter.Create(shortcutPath, AppPaths.RuntimePath, "",
+            arguments, ResolveShortcutIcon(settings.ShortcutIcon));
+        ShellRefresh.NotifyItem(shortcutPath);
+        ShellRefresh.NotifyDirectory(desktop);
+        return shortcutPath;
+    }
+
+    private static void RemoveOwnedDesktopShortcut(ManagedConnectionInfo profile)
+    {
+        if (profile == null || profile.Settings == null)
+            return;
+        string desktop = Environment.GetFolderPath(
+            Environment.SpecialFolder.DesktopDirectory);
+        string path = Path.Combine(desktop,
+            profile.Settings.ShortcutName + ".lnk");
+        if (!File.Exists(path) || !IsOwnedShortcut(path, profile.ProfileId))
+            return;
+        File.Delete(path);
+        ShellRefresh.NotifyItem(path);
+        ShellRefresh.NotifyDirectory(desktop);
+    }
+
+    internal static bool IsOwnedShortcut(string path, string profileId)
+    {
+        if (!SettingsStore.IsValidProfileId(profileId) ||
+            string.IsNullOrEmpty(path) || !File.Exists(path))
+            return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(
+                    ShortcutWriter.ReadTargetPath(path)),
+                    Path.GetFullPath(AppPaths.RuntimePath),
+                    StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ShortcutWriter.ReadArguments(path),
+                    "--profile " + profileId, StringComparison.Ordinal) &&
+                ShortcutWriter.ReadWorkingDirectory(path).Length == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private ConnectionDiagnosticsContext BuildDiagnosticsContext(
+        ManagedConnectionInfo profile)
+    {
+        ConnectionDiagnosticsContext context =
+            new ConnectionDiagnosticsContext();
+        context.ApplicationVersion = Assembly.GetExecutingAssembly()
+            .GetName().Version.ToString();
+        context.RuntimePath = AppPaths.RuntimePath;
+        context.MstscPath = Path.Combine(
+            Environment.SystemDirectory, "mstsc.exe");
+        context.ApplicationSignatureValid =
+            ExecutableSignatureStatus.IsTrusted(AppPaths.RuntimePath);
+        context.RdpPublisherTrusted = LocalRdpPublisherTrust.IsInstalled();
+        context.AvailableMonitorIds = GetAvailableMonitorIds();
+        context.SelectedMonitorIds = ReadSelectedMonitorIds(profile.RdpPath);
+        context.Shortcut = InspectManagedShortcut(profile);
+        return context;
+    }
+
+    private static ConnectionShortcutSnapshot InspectManagedShortcut(
+        ManagedConnectionInfo profile)
+    {
+        ConnectionShortcutSnapshot snapshot =
+            new ConnectionShortcutSnapshot();
+        snapshot.Inspected = true;
+        if (profile == null || profile.Settings == null)
+            return snapshot;
+        string path = Path.Combine(Environment.GetFolderPath(
+            Environment.SpecialFolder.DesktopDirectory),
+            profile.Settings.ShortcutName + ".lnk");
+        snapshot.Exists = File.Exists(path);
+        if (!snapshot.Exists)
+            return snapshot;
+        try
+        {
+            snapshot.TargetPath = ShortcutWriter.ReadTargetPath(path);
+            snapshot.Arguments = ShortcutWriter.ReadArguments(path);
+            snapshot.IconLocation = ShortcutWriter.ReadIconLocation(path);
+            snapshot.WorkingDirectory =
+                ShortcutWriter.ReadWorkingDirectory(path);
+        }
+        catch
+        {
+            snapshot.TargetPath = "";
+            snapshot.Arguments = "";
+            snapshot.IconLocation = "";
+            snapshot.WorkingDirectory = "";
+        }
+        return snapshot;
+    }
+
+    private static int[] GetAvailableMonitorIds()
+    {
+        List<int> ids = new List<int>();
+        foreach (MonitorDescriptor monitor in
+            new ScreenMonitorTopologySource().GetMonitors())
+            ids.Add(monitor.MstscId);
+        return ids.ToArray();
+    }
+
+    private static int[] ReadSelectedMonitorIds(string rdpPath)
+    {
+        List<int> ids = new List<int>();
+        try
+        {
+            using (FileStream stream = new FileStream(rdpPath, FileMode.Open,
+                FileAccess.Read, FileShare.Read))
+            using (StreamReader reader = new StreamReader(stream,
+                Encoding.Default, true))
+            {
+                if (stream.Length > 4 * 1024 * 1024)
+                    return ids.ToArray();
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    const string prefix = "selectedmonitors:s:";
+                    if (!line.StartsWith(prefix,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    string normalized =
+                        RdpProfileWriter.NormalizeSelectedMonitors(
+                            line.Substring(prefix.Length));
+                    foreach (string piece in normalized.Split(','))
+                    {
+                        int value;
+                        if (int.TryParse(piece, out value))
+                            ids.Add(value);
+                    }
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            ids.Clear();
+        }
+        return ids.ToArray();
     }
 
     internal static Size LimitWindowSizeToWorkingArea(Size renderedSize,
@@ -619,15 +1151,123 @@ internal sealed class SetupForm : Form
         bool customProfile = rdpFileText.Text.Trim().Length == 0;
         fullScreenCheck.Enabled = customProfile;
         allMonitorsCheck.Enabled = customProfile;
-        resolutionCombo.Enabled = customProfile && !allMonitorsCheck.Checked;
-        alwaysAskCredentialsCheck.Enabled = customProfile;
+        chooseMonitorsButton.Enabled = customProfile && !allMonitorsCheck.Checked;
+        resolutionCombo.Enabled = customProfile && !allMonitorsCheck.Checked &&
+            monitorSelection == null;
         redirectClipboardCheck.Enabled = customProfile;
         redirectDrivesCheck.Enabled = customProfile;
+        redirectPrintersCheck.Enabled = customProfile;
+        redirectMicrophoneCheck.Enabled = customProfile;
         redirectLocationCheck.Enabled = customProfile;
         redirectComPortsCheck.Enabled = customProfile;
         redirectWebAuthnCheck.Enabled = customProfile;
         redirectSmartCardsCheck.Enabled = customProfile;
         trustPublisherCheck.Enabled = customProfile;
+        previewImportButton.Enabled = !customProfile &&
+            File.Exists(rdpFileText.Text.Trim());
+    }
+
+    private void PreviewRdpFile(object sender, EventArgs eventArgs)
+    {
+        string path = rdpFileText.Text.Trim();
+        try
+        {
+            using (RdpImportSnapshot snapshot = RdpImportSnapshot.Create(path))
+            using (RdpImportPreviewDialog dialog =
+                new RdpImportPreviewDialog(snapshot.SnapshotPath,
+                    snapshot.SourceFileName, false))
+                dialog.ShowDialog(this);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this,
+                "The RDP file could not be previewed.\r\n\r\n" +
+                exception.Message, AppPaths.ProductName,
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void ChooseSpecificMonitors(object sender, EventArgs eventArgs)
+    {
+        try
+        {
+            IMonitorTopologySource source = new ScreenMonitorTopologySource();
+            IList<MonitorDescriptor> topology = source.GetMonitors();
+            MonitorSelection initial = monitorSelection;
+            if (initial == null)
+            {
+                int remoteId = topology[0].MstscId;
+                int reminderId = remoteId;
+                DisplayChoice selectedDisplay =
+                    displayCombo.SelectedItem as DisplayChoice;
+                foreach (MonitorDescriptor monitor in topology)
+                {
+                    if (monitor.IsPrimary)
+                        remoteId = monitor.MstscId;
+                    if (selectedDisplay != null && string.Equals(
+                            selectedDisplay.DeviceName, monitor.DeviceName,
+                            StringComparison.OrdinalIgnoreCase))
+                        reminderId = monitor.MstscId;
+                }
+                initial = new MonitorSelection(topology,
+                    new int[] { remoteId }, reminderId);
+            }
+
+            using (MonitorSelectionDialog dialog =
+                new MonitorSelectionDialog(source, initial))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                    return;
+                dialog.Selection.ValidateForRdp();
+                monitorSelection = dialog.Selection;
+            }
+
+            allMonitorsCheck.Checked = false;
+            SelectReminderDisplay(monitorSelection.ReminderDeviceName);
+            UpdateCustomOptionState();
+            UpdateMonitorSummary();
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, AppPaths.ProductName,
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void SelectReminderDisplay(string deviceName)
+    {
+        for (int index = 0; index < displayCombo.Items.Count; index++)
+        {
+            DisplayChoice choice = displayCombo.Items[index] as DisplayChoice;
+            if (choice != null && string.Equals(choice.DeviceName, deviceName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                displayCombo.SelectedIndex = index;
+                return;
+            }
+        }
+    }
+
+    private void UpdateMonitorSummary()
+    {
+        if (allMonitorsCheck.Checked)
+        {
+            monitorSummary.Text = "Remote session: all monitors";
+            return;
+        }
+        if (monitorSelection == null)
+        {
+            monitorSummary.Text =
+                "Remote session: Windows default single monitor";
+            return;
+        }
+        List<string> displays = new List<string>();
+        foreach (int id in monitorSelection.RemoteMonitorIds)
+            displays.Add("Display " + (id + 1).ToString());
+        monitorSummary.Text = "Remote session: " +
+            string.Join(", ", displays.ToArray()) +
+            "; remote primary: Display " +
+            (monitorSelection.RemotePrimaryMonitorId + 1).ToString();
     }
 
     private void UpdatePublisherTrustStatus()
@@ -745,28 +1385,65 @@ internal sealed class SetupForm : Form
 
     private void SaveAndConnect(object sender, EventArgs eventArgs)
     {
-        if (updateController.IsBusy)
+        SaveAndConnectCore(false);
+    }
+
+    private void SaveAndConnectOnce(object sender, EventArgs eventArgs)
+    {
+        SaveAndConnectCore(true);
+    }
+
+    private void SaveAndConnectCore(bool oneTime)
+    {
+        RdpImportSnapshot importSnapshot = null;
+        try
         {
-            MessageBox.Show(this,
-                "Wait for the current update check or download to finish, then " +
-                "create the connection.",
-                AppPaths.ProductName, MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
-            return;
-        }
-        string selectedRdpFile = rdpFileText.Text.Trim();
-        if (selectedRdpFile.Length > 0 &&
-            (!File.Exists(selectedRdpFile) ||
-             !string.Equals(Path.GetExtension(selectedRdpFile), ".rdp",
-                StringComparison.OrdinalIgnoreCase)))
-        {
-            MessageBox.Show(this,
-                "Choose an existing .rdp connection file, or leave the field empty.",
-                AppPaths.ProductName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            rdpFileText.Focus();
-            rdpFileText.SelectAll();
-            return;
-        }
+            if (updateController.IsBusy)
+            {
+                MessageBox.Show(this,
+                    "Wait for the current update check or download to finish, then " +
+                    "create the connection.",
+                    AppPaths.ProductName, MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+            string selectedRdpFile = rdpFileText.Text.Trim();
+            if (selectedRdpFile.Length > 0 &&
+                (!File.Exists(selectedRdpFile) ||
+                 !string.Equals(Path.GetExtension(selectedRdpFile), ".rdp",
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                MessageBox.Show(this,
+                    "Choose an existing .rdp connection file, or leave the field empty.",
+                    AppPaths.ProductName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                FocusWorkflowControl(0, rdpFileText, true);
+                return;
+            }
+
+            if (selectedRdpFile.Length > 0)
+            {
+                try
+                {
+                    importSnapshot = RdpImportSnapshot.Create(selectedRdpFile);
+                    using (RdpImportPreviewDialog dialog =
+                        new RdpImportPreviewDialog(importSnapshot.SnapshotPath,
+                            importSnapshot.SourceFileName, true))
+                    {
+                        if (dialog.ShowDialog(this) != DialogResult.OK)
+                            return;
+                    }
+                    selectedRdpFile = importSnapshot.SnapshotPath;
+                }
+                catch (Exception exception)
+                {
+                    MessageBox.Show(this,
+                        "The RDP file could not be locked and previewed safely.\r\n\r\n" +
+                        exception.Message, AppPaths.ProductName,
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    FocusWorkflowControl(0, rdpFileText, true);
+                    return;
+                }
+            }
 
         string computer;
         if (selectedRdpFile.Length > 0)
@@ -780,8 +1457,7 @@ internal sealed class SetupForm : Form
                     "alternate full address or full address.",
                     AppPaths.ProductName, MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
-                rdpFileText.Focus();
-                rdpFileText.SelectAll();
+                FocusWorkflowControl(0, rdpFileText, true);
                 return;
             }
             computerText.Text = computer;
@@ -798,14 +1474,15 @@ internal sealed class SetupForm : Form
                     "Enter a valid computer name, DNS name, IP address, or optional port.",
                     AppPaths.ProductName, MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
-                computerText.Focus();
-                computerText.SelectAll();
+                FocusWorkflowControl(0, computerText, true);
                 return;
             }
         }
 
         string profileId = Guid.NewGuid().ToString("N");
-        string profileDirectory = AppPaths.GetProfileDirectory(profileId);
+        string profileDirectory = oneTime
+            ? AppPaths.GetOneTimeProfileDirectory(profileId)
+            : AppPaths.GetProfileDirectory(profileId);
         ResolutionChoice selectedResolution =
             resolutionCombo.SelectedItem as ResolutionChoice;
         if (selectedRdpFile.Length == 0 && selectedResolution == null)
@@ -823,7 +1500,7 @@ internal sealed class SetupForm : Form
                 LocalRdpPublisherTrust.LocationSigningConflictMessage,
                 AppPaths.ProductName, MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
-            redirectLocationCheck.Focus();
+            FocusWorkflowControl(2, redirectLocationCheck, false);
             return;
         }
 
@@ -836,13 +1513,22 @@ internal sealed class SetupForm : Form
             reminderText.Text, computer);
         DisplayChoice selectedDisplay = displayCombo.SelectedItem as DisplayChoice;
         settings.DisplayDevice = selectedDisplay == null ? "" : selectedDisplay.DeviceName;
-        settings.RdpFile = AppPaths.GetProfileConnectionPath(profileId);
+        settings.RdpFile = oneTime
+            ? AppPaths.GetOneTimeConnectionPath(profileId)
+            : AppPaths.GetProfileConnectionPath(profileId);
+        bannerSetupPage.ApplyTo(settings);
+        ShortcutIconChoice selectedIcon =
+            shortcutIconCombo.SelectedItem as ShortcutIconChoice;
+        settings.ShortcutIcon = selectedIcon == null
+            ? "WindowsRemoteDesktop"
+            : selectedIcon.Kind.ToString();
 
         SetupOperationRequest request = new SetupOperationRequest();
         request.ProfileId = profileId;
         request.ProfileDirectory = profileDirectory;
         request.SelectedRdpFile = selectedRdpFile;
         request.Settings = settings;
+        request.OneTime = oneTime;
         request.ShortcutNameWasAutomatic = !shortcutManuallyEdited;
         request.ReminderWasAutomatic = !reminderManuallyEdited;
         request.TrustPublisher = selectedRdpFile.Length == 0 &&
@@ -852,13 +1538,27 @@ internal sealed class SetupForm : Form
             request.ProfileOptions = new RdpProfileOptions(
                 computer, fullScreenCheck.Checked,
                 selectedResolution.Width, selectedResolution.Height,
-                allMonitorsCheck.Checked, alwaysAskCredentialsCheck.Checked,
+                allMonitorsCheck.Checked || monitorSelection != null,
+                monitorSelection == null ? "" :
+                    monitorSelection.SelectedMonitorsSetting,
+                false,
                 redirectClipboardCheck.Checked, redirectDrivesCheck.Checked,
                 redirectLocationCheck.Checked, redirectComPortsCheck.Checked,
                 redirectWebAuthnCheck.Checked,
-                redirectSmartCardsCheck.Checked);
+                redirectSmartCardsCheck.Checked,
+                redirectPrintersCheck.Checked,
+                redirectMicrophoneCheck.Checked);
         }
-        BeginSetupOperation(request);
+            request.DeleteSelectedRdpFileAfterUse = importSnapshot != null;
+            BeginSetupOperation(request);
+            if (importSnapshot != null)
+                importSnapshot.Detach();
+        }
+        finally
+        {
+            if (importSnapshot != null)
+                importSnapshot.Dispose();
+        }
     }
 
     private void BeginSetupOperation(SetupOperationRequest request)
@@ -866,6 +1566,7 @@ internal sealed class SetupForm : Form
         operationRunning = true;
         tabs.Enabled = false;
         connectButton.Enabled = false;
+        oneTimeButton.Enabled = false;
         cancelButton.Enabled = false;
         UseWaitCursor = true;
         operationStatus.Text = "Preparing the connection...";
@@ -904,6 +1605,7 @@ internal sealed class SetupForm : Form
                 operationRunning = false;
                 tabs.Enabled = true;
                 connectButton.Enabled = true;
+                oneTimeButton.Enabled = true;
                 cancelButton.Enabled = true;
                 UseWaitCursor = false;
                 operationStatus.Text = "Setup stopped. Review the error and try again.";
@@ -952,8 +1654,9 @@ internal sealed class SetupForm : Form
                 ? "Copying and verifying the selected RDP profile..."
                 : "Writing the Remote Desktop profile...");
             Directory.CreateDirectory(request.ProfileDirectory);
-            string profileRdpFile = AppPaths.GetProfileConnectionPath(
-                request.ProfileId);
+            string profileRdpFile = request.OneTime
+                ? AppPaths.GetOneTimeConnectionPath(request.ProfileId)
+                : AppPaths.GetProfileConnectionPath(request.ProfileId);
             if (request.SelectedRdpFile.Length > 0)
                 CopyRdpFileVerified(request.SelectedRdpFile, profileRdpFile);
             else
@@ -987,56 +1690,71 @@ internal sealed class SetupForm : Form
                     "REMOTE SESSION - " + copiedTarget.ToUpperInvariant(),
                     copiedTarget);
 
-            string desktop = Environment.GetFolderPath(
-                Environment.SpecialFolder.DesktopDirectory);
-            using (Mutex shortcutMutex = new Mutex(
-                false, "Local\\RdpSessionReminder-ShortcutCreation"))
+            if (!request.OneTime)
             {
-                bool ownsShortcutMutex = false;
-                try
+                string desktop = Environment.GetFolderPath(
+                    Environment.SpecialFolder.DesktopDirectory);
+                using (Mutex shortcutMutex = new Mutex(
+                    false, "Local\\RdpSessionReminder-ShortcutCreation"))
                 {
+                    bool ownsShortcutMutex = false;
                     try
                     {
-                        ownsShortcutMutex = shortcutMutex.WaitOne(
-                            TimeSpan.FromSeconds(30));
+                        try
+                        {
+                            ownsShortcutMutex = shortcutMutex.WaitOne(
+                                TimeSpan.FromSeconds(30));
+                        }
+                        catch (AbandonedMutexException)
+                        {
+                            ownsShortcutMutex = true;
+                        }
+                        if (!ownsShortcutMutex)
+                            throw new TimeoutException(
+                                "Another setup window is creating a shortcut. Try again.");
+
+                        reservedShortcutPath = ShortcutPathHelper.ReserveUniquePath(
+                            desktop, request.Settings.ShortcutName);
+                        request.Settings.ShortcutName =
+                            Path.GetFileNameWithoutExtension(reservedShortcutPath);
+
+                        worker.ReportProgress(4, "Saving the reminder settings...");
+                        SettingsStore.SaveTo(
+                            AppPaths.GetProfileSettingsPath(request.ProfileId),
+                            request.Settings);
+
+                        worker.ReportProgress(5, "Creating the desktop shortcut...");
+                        ShortcutWriter.Create(reservedShortcutPath,
+                            AppPaths.RuntimePath, "", "--profile " + request.ProfileId,
+                            ResolveShortcutIcon(request.Settings.ShortcutIcon));
+                        result.ShortcutCompleted = true;
                     }
-                    catch (AbandonedMutexException)
+                    finally
                     {
-                        ownsShortcutMutex = true;
+                        if (ownsShortcutMutex)
+                            shortcutMutex.ReleaseMutex();
                     }
-                    if (!ownsShortcutMutex)
-                        throw new TimeoutException(
-                            "Another setup window is creating a shortcut. Try again.");
-
-                    reservedShortcutPath = ShortcutPathHelper.ReserveUniquePath(
-                        desktop, request.Settings.ShortcutName);
-                    request.Settings.ShortcutName =
-                        Path.GetFileNameWithoutExtension(reservedShortcutPath);
-
-                    worker.ReportProgress(4, "Saving the reminder settings...");
-                    SettingsStore.SaveTo(
-                        AppPaths.GetProfileSettingsPath(request.ProfileId),
-                        request.Settings);
-
-                    worker.ReportProgress(5, "Creating the desktop shortcut...");
-                    ShortcutWriter.Create(reservedShortcutPath,
-                        AppPaths.RuntimePath, "", "--profile " + request.ProfileId);
-                    result.ShortcutCompleted = true;
                 }
-                finally
-                {
-                    if (ownsShortcutMutex)
-                        shortcutMutex.ReleaseMutex();
-                }
+
+                ShellRefresh.NotifyItem(reservedShortcutPath);
+                ShellRefresh.NotifyDirectory(desktop);
             }
-
-            ShellRefresh.NotifyItem(reservedShortcutPath);
-            ShellRefresh.NotifyDirectory(desktop);
+            else
+            {
+                worker.ReportProgress(4, "Saving temporary reminder settings...");
+                SettingsStore.SaveTo(
+                    AppPaths.GetOneTimeSettingsPath(request.ProfileId),
+                    request.Settings);
+                worker.ReportProgress(5,
+                    "One-time mode selected; no desktop shortcut was created.");
+            }
 
             worker.ReportProgress(6, "Starting Remote Desktop...");
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = AppPaths.RuntimePath;
-            startInfo.Arguments = "--profile " + request.ProfileId;
+            startInfo.Arguments = (request.OneTime
+                ? "--one-time "
+                : "--profile ") + request.ProfileId;
             startInfo.UseShellExecute = true;
             Process.Start(startInfo);
             worker.ReportProgress(7, "Completed. Remote Desktop is starting...");
@@ -1046,6 +1764,11 @@ internal sealed class SetupForm : Form
             CleanupFailedProfile(request.ProfileDirectory,
                 reservedShortcutPath, result.ShortcutCompleted);
             result.Failure = exception;
+        }
+        finally
+        {
+            if (request.DeleteSelectedRdpFileAfterUse)
+                DeleteImportSnapshot(request.SelectedRdpFile);
         }
         return result;
     }
@@ -1069,12 +1792,29 @@ internal sealed class SetupForm : Form
         public bool ShortcutNameWasAutomatic;
         public bool ReminderWasAutomatic;
         public bool TrustPublisher;
+        public bool OneTime;
+        public bool DeleteSelectedRdpFileAfterUse;
     }
 
     private sealed class SetupOperationResult
     {
         public bool ShortcutCompleted;
         public Exception Failure;
+    }
+
+    internal static string ResolveShortcutIcon(string value)
+    {
+        ShortcutIconKind kind = ShortcutIconKind.WindowsRemoteDesktop;
+        try
+        {
+            kind = (ShortcutIconKind)Enum.Parse(typeof(ShortcutIconKind),
+                SettingsStore.NormalizeShortcutIcon(value), true);
+        }
+        catch
+        {
+            kind = ShortcutIconKind.WindowsRemoteDesktop;
+        }
+        return ShortcutIconCatalog.Resolve(kind).IconLocation;
     }
 
     private static void CleanupFailedProfile(string profileDirectory,
@@ -1101,10 +1841,88 @@ internal sealed class SetupForm : Form
         if (!shortcutAbsent)
             return;
 
+        TryDeleteKnownFailedProfile(profileDirectory);
+    }
+
+    private static void TryDeleteKnownFailedProfile(string profileDirectory)
+    {
         try
         {
-            if (Directory.Exists(profileDirectory))
-                Directory.Delete(profileDirectory, true);
+            if (string.IsNullOrWhiteSpace(profileDirectory) ||
+                !Directory.Exists(profileDirectory))
+                return;
+            string fullDirectory = Path.GetFullPath(profileDirectory);
+            string name = Path.GetFileName(fullDirectory);
+            if (!SettingsStore.IsValidProfileId(name))
+                return;
+            string profilesRoot = Path.GetFullPath(AppPaths.ProfilesDirectory);
+            string oneTimeRoot = Path.GetFullPath(
+                AppPaths.OneTimeProfilesDirectory);
+            string parent = Path.GetDirectoryName(fullDirectory);
+            string root = string.Equals(parent, profilesRoot,
+                StringComparison.OrdinalIgnoreCase)
+                ? profilesRoot
+                : string.Equals(parent, oneTimeRoot,
+                    StringComparison.OrdinalIgnoreCase)
+                    ? oneTimeRoot
+                    : "";
+            if (root.Length == 0 || IsReparsePointForCleanup(root) ||
+                IsReparsePointForCleanup(fullDirectory))
+                return;
+            string settings = Path.Combine(fullDirectory,
+                AppPaths.SettingsFileName);
+            string rdp = Path.Combine(fullDirectory,
+                AppPaths.ConnectionFileName);
+            foreach (string entry in Directory.GetFileSystemEntries(
+                fullDirectory))
+            {
+                if ((!string.Equals(entry, settings,
+                         StringComparison.OrdinalIgnoreCase) &&
+                     !string.Equals(entry, rdp,
+                         StringComparison.OrdinalIgnoreCase)) ||
+                    Directory.Exists(entry) ||
+                    IsReparsePointForCleanup(entry))
+                    return;
+            }
+            string ignored;
+            OneTimeProfileStore.TryDeleteExactFromRoot(root, name,
+                out ignored);
+        }
+        catch
+        {
+        }
+    }
+
+    private static bool IsReparsePointForCleanup(string path)
+    {
+        return File.Exists(path) || Directory.Exists(path)
+            ? (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0
+            : false;
+    }
+
+    private static void DeleteImportSnapshot(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+        try
+        {
+            string fullPath = Path.GetFullPath(path);
+            string temporaryRoot = Path.GetFullPath(Path.GetTempPath())
+                .TrimEnd(Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+            string name = Path.GetFileName(fullPath);
+            if (!fullPath.StartsWith(temporaryRoot,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !name.StartsWith("RdpSessionReminder-import-",
+                    StringComparison.Ordinal) ||
+                !string.Equals(Path.GetExtension(name), ".rdp",
+                    StringComparison.OrdinalIgnoreCase) ||
+                Directory.Exists(fullPath) ||
+                IsReparsePointForCleanup(fullPath))
+                return;
+            if (File.Exists(fullPath))
+                File.Delete(fullPath);
         }
         catch
         {
@@ -1113,40 +1931,175 @@ internal sealed class SetupForm : Form
 
     private static void InstallApplicationFiles()
     {
-        Directory.CreateDirectory(AppPaths.InstallDirectory);
         string currentSetup = Application.ExecutablePath;
         string currentDirectory = Path.GetDirectoryName(currentSetup);
         string sourceRuntime = Path.Combine(currentDirectory, AppPaths.RuntimeFileName);
+        InstallApplicationFilesFrom(
+            sourceRuntime, currentSetup, AppPaths.InstallDirectory);
+    }
+
+    internal static void InstallApplicationFilesFrom(string sourceRuntime,
+        string currentSetup, string installDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(sourceRuntime))
+            throw new ArgumentException(
+                "A runtime source path is required.", "sourceRuntime");
+        if (string.IsNullOrWhiteSpace(currentSetup))
+            throw new ArgumentException(
+                "A setup source path is required.", "currentSetup");
+        if (string.IsNullOrWhiteSpace(installDirectory))
+            throw new ArgumentException(
+                "An install directory is required.", "installDirectory");
+
+        sourceRuntime = Path.GetFullPath(sourceRuntime);
+        currentSetup = Path.GetFullPath(currentSetup);
+        installDirectory = Path.GetFullPath(installDirectory);
         if (!File.Exists(sourceRuntime))
             throw new FileNotFoundException(
                 "The runtime executable is missing. Extract and run setup from " +
                 "the complete release package.", sourceRuntime);
+        if (!File.Exists(currentSetup))
+            throw new FileNotFoundException(
+                "The setup executable is missing.", currentSetup);
 
-        CopyUnlessSame(sourceRuntime, AppPaths.RuntimePath);
-        CopyUnlessSame(currentSetup, AppPaths.SetupPath);
-        DeleteStaleUninstallNote(AppPaths.InstallDirectory);
+        EnsureSafeInstallDirectory(installDirectory, false);
+        Directory.CreateDirectory(installDirectory);
+        EnsureSafeInstallDirectory(installDirectory, true);
+
+        CopyUnlessSame(sourceRuntime, Path.Combine(installDirectory,
+            AppPaths.RuntimeFileName), installDirectory);
+        CopyUnlessSame(currentSetup, Path.Combine(installDirectory,
+            AppPaths.SetupFileName), installDirectory);
+        DeleteStaleUninstallNote(installDirectory);
     }
 
     internal static void DeleteStaleUninstallNote(string installDirectory)
     {
         if (string.IsNullOrEmpty(installDirectory))
             throw new ArgumentException("An install directory is required.");
-        string note = Path.Combine(Path.GetFullPath(installDirectory),
+        installDirectory = Path.GetFullPath(installDirectory);
+        EnsureSafeInstallDirectory(installDirectory, true);
+        string note = Path.Combine(installDirectory,
             "README - Saved RDP Connections.txt");
         if (File.Exists(note))
+        {
+            EnsureSafeInstallDirectory(installDirectory, true);
             File.Delete(note);
+        }
     }
 
-    private static void CopyUnlessSame(string source, string destination)
+    private static void CopyUnlessSame(string source, string destination,
+        string installDirectory)
     {
+        EnsureSafeInstallDirectory(installDirectory, true);
         if (!File.Exists(source))
             return;
+        EnsureSafeInstallFileDestination(destination);
         if (string.Equals(Path.GetFullPath(source), Path.GetFullPath(destination),
             StringComparison.OrdinalIgnoreCase))
             return;
         if (File.Exists(destination) && FilesMatch(source, destination))
             return;
-        File.Copy(source, destination, true);
+
+        string temporary = destination + ".installing-" +
+            Guid.NewGuid().ToString("N");
+        try
+        {
+            EnsureSafeInstallDirectory(installDirectory, true);
+            File.Copy(source, temporary, false);
+            if (!FilesMatch(source, temporary))
+                throw new IOException(
+                    "The copied application file could not be verified.");
+
+            EnsureSafeInstallDirectory(installDirectory, true);
+            EnsureSafeInstallFileDestination(destination);
+            if (File.Exists(destination))
+            {
+                try
+                {
+                    File.Replace(temporary, destination, null, true);
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    EnsureSafeInstallFileDestination(destination);
+                    File.Delete(destination);
+                    EnsureSafeInstallDirectory(installDirectory, true);
+                    File.Move(temporary, destination);
+                }
+            }
+            else
+            {
+                File.Move(temporary, destination);
+            }
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+                File.Delete(temporary);
+        }
+    }
+
+    private static void EnsureSafeInstallFileDestination(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(fullPath);
+        }
+        catch (FileNotFoundException)
+        {
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return;
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException(
+                "An application file destination cannot be a reparse point " +
+                "or file link: " + fullPath);
+        if ((attributes & FileAttributes.Directory) != 0)
+            throw new IOException(
+                "An application file destination cannot be a directory: " +
+                fullPath);
+    }
+
+    internal static void EnsureSafeInstallDirectory(string path,
+        bool mustExist)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException(
+                "An install directory is required.", "path");
+        string fullPath = Path.GetFullPath(path);
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(fullPath);
+        }
+        catch (FileNotFoundException)
+        {
+            if (mustExist)
+                throw new DirectoryNotFoundException(
+                    "The application folder no longer exists: " + fullPath);
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            if (mustExist)
+                throw new DirectoryNotFoundException(
+                    "The application folder no longer exists: " + fullPath);
+            return;
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException(
+                "The application folder cannot be a reparse point or " +
+                "directory link: " + fullPath);
+        if ((attributes & FileAttributes.Directory) == 0)
+            throw new IOException(
+                "The application folder is not a directory: " + fullPath);
     }
 
     private static void CopyRdpFileVerified(string source, string destination)
@@ -1216,6 +2169,13 @@ internal static class ShortcutWriter
     public static void Create(string shortcutPath, string targetPath,
         string workingDirectory, string arguments)
     {
+        Create(shortcutPath, targetPath, workingDirectory, arguments,
+            Path.Combine(Environment.SystemDirectory, "mstsc.exe") + ",0");
+    }
+
+    public static void Create(string shortcutPath, string targetPath,
+        string workingDirectory, string arguments, string iconLocation)
+    {
         Type shellType = Type.GetTypeFromProgID("WScript.Shell");
         if (shellType == null)
             throw new InvalidOperationException("Windows Script Host is unavailable.");
@@ -1238,7 +2198,9 @@ internal static class ShortcutWriter
                     "Connect with a local Remote Desktop session reminder" });
             shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty,
                 null, shortcut, new object[] {
-                    Path.Combine(Environment.SystemDirectory, "mstsc.exe") + ",0" });
+                    string.IsNullOrWhiteSpace(iconLocation)
+                        ? Path.Combine(Environment.SystemDirectory, "mstsc.exe") + ",0"
+                        : iconLocation });
             shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod,
                 null, shortcut, null);
         }
@@ -1264,6 +2226,11 @@ internal static class ShortcutWriter
     public static string ReadTargetPath(string shortcutPath)
     {
         return ReadStringProperty(shortcutPath, "TargetPath");
+    }
+
+    public static string ReadIconLocation(string shortcutPath)
+    {
+        return ReadStringProperty(shortcutPath, "IconLocation");
     }
 
     private static string ReadStringProperty(string shortcutPath,
@@ -2407,6 +3374,14 @@ internal sealed class DisplayChoice
             screen.Primary ? " (Primary)" : "",
             screen.Bounds.Width,
             screen.Bounds.Height);
+    }
+
+    public DisplayChoice(MonitorDescriptor monitor)
+    {
+        if (monitor == null)
+            throw new ArgumentNullException("monitor");
+        DeviceName = monitor.DeviceName;
+        label = monitor.GetDisplayLabel();
     }
 
     public override string ToString()

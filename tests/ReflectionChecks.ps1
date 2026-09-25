@@ -85,12 +85,14 @@ try {
             'resolutionCombo', $instanceFields).GetValue($form)
         $allMonitorsCheck = $setupFormType.GetField(
             'allMonitorsCheck', $instanceFields).GetValue($form)
-        $alwaysAskCredentialsCheck = $setupFormType.GetField(
-            'alwaysAskCredentialsCheck', $instanceFields).GetValue($form)
         $redirectClipboardCheck = $setupFormType.GetField(
             'redirectClipboardCheck', $instanceFields).GetValue($form)
         $redirectDrivesCheck = $setupFormType.GetField(
             'redirectDrivesCheck', $instanceFields).GetValue($form)
+        $redirectPrintersCheck = $setupFormType.GetField(
+            'redirectPrintersCheck', $instanceFields).GetValue($form)
+        $redirectMicrophoneCheck = $setupFormType.GetField(
+            'redirectMicrophoneCheck', $instanceFields).GetValue($form)
         $redirectLocationCheck = $setupFormType.GetField(
             'redirectLocationCheck', $instanceFields).GetValue($form)
         $redirectComPortsCheck = $setupFormType.GetField(
@@ -101,6 +103,14 @@ try {
             'redirectSmartCardsCheck', $instanceFields).GetValue($form)
         $trustPublisherCheck = $setupFormType.GetField(
             'trustPublisherCheck', $instanceFields).GetValue($form)
+        $previewImportButton = $setupFormType.GetField(
+            'previewImportButton', $instanceFields).GetValue($form)
+        $chooseMonitorsButton = $setupFormType.GetField(
+            'chooseMonitorsButton', $instanceFields).GetValue($form)
+        $shortcutIconCombo = $setupFormType.GetField(
+            'shortcutIconCombo', $instanceFields).GetValue($form)
+        $oneTimeButton = $setupFormType.GetField(
+            'oneTimeButton', $instanceFields).GetValue($form)
         $tabs = $setupFormType.GetField(
             'tabs', $instanceFields).GetValue($form)
         $operationStatus = $setupFormType.GetField(
@@ -109,11 +119,24 @@ try {
             'operationProgress', $instanceFields).GetValue($form)
 
         $updatePage = $tabs.TabPages | Where-Object { $_.Text -eq 'Updates' }
+        $connectionsPage = $tabs.TabPages |
+            Where-Object { $_.Text -eq 'Saved connections' }
+        $appearancePage = $tabs.TabPages |
+            Where-Object { $_.Text -eq '4. Reminder' }
         $installExplanation = $updatePage.Controls | Where-Object {
             $_ -is [Windows.Forms.Label] -and
             $_.Text -like 'Updates go directly to the newest stable version.*'
         }
-        if ($null -eq $updatePage -or -not $form.AutoScroll -or
+        if ($null -eq $updatePage -or $null -eq $connectionsPage -or
+            $null -eq $appearancePage -or
+            $tabs.TabPages.Count -ne 6 -or
+            $tabs.TabPages[0].Text -ne '1. Connection' -or
+            $tabs.TabPages[1].Text -ne '2. Displays' -or
+            $tabs.TabPages[2].Text -ne '3. Resources' -or
+            $tabs.TabPages[3].Text -ne '4. Reminder' -or
+            $tabs.TabPages[4].Text -ne 'Saved connections' -or
+            $tabs.TabPages[5].Text -ne 'Updates' -or
+            -not $form.AutoScroll -or
             $operationStatus.Visible -or
             $operationProgress.Visible) {
             throw 'Setup update/progress controls were not initialized correctly.'
@@ -139,14 +162,20 @@ try {
         if (-not $fullScreenCheck.Checked -or
             $resolutionCombo.SelectedItem.ToString() -notlike '*Native/current*' -or
             $allMonitorsCheck.Checked -or
-            -not $alwaysAskCredentialsCheck.Checked -or
             -not $redirectClipboardCheck.Checked -or
             $redirectDrivesCheck.Checked -or
+            $redirectPrintersCheck.Checked -or
+            $redirectMicrophoneCheck.Checked -or
             $redirectLocationCheck.Checked -or
             $redirectComPortsCheck.Checked -or
             -not $redirectWebAuthnCheck.Checked -or
             $redirectSmartCardsCheck.Checked -or
-            $trustPublisherCheck.Checked) {
+            $trustPublisherCheck.Checked -or
+            $previewImportButton.Enabled -or
+            -not $chooseMonitorsButton.Enabled -or
+            $shortcutIconCombo.SelectedItem.ToString() -notlike
+                'Windows Remote Desktop*' -or
+            $oneTimeButton.Text -ne 'Connect once') {
             throw 'Setup custom-profile defaults do not match the guided configuration.'
         }
 
@@ -156,14 +185,17 @@ try {
             $fullScreenCheck.Enabled -or
             $resolutionCombo.Enabled -or
             $allMonitorsCheck.Enabled -or
-            $alwaysAskCredentialsCheck.Enabled -or
             $redirectClipboardCheck.Enabled -or
             $redirectDrivesCheck.Enabled -or
+            $redirectPrintersCheck.Enabled -or
+            $redirectMicrophoneCheck.Enabled -or
             $redirectLocationCheck.Enabled -or
             $redirectComPortsCheck.Enabled -or
             $redirectWebAuthnCheck.Enabled -or
             $redirectSmartCardsCheck.Enabled -or
             $trustPublisherCheck.Enabled -or
+            $chooseMonitorsButton.Enabled -or
+            -not $previewImportButton.Enabled -or
             $reminderText.Text -ne 'REMOTE SESSION - LAB-B') {
             throw 'Setup did not enter the expected read-only RDP file mode.'
         }
@@ -171,14 +203,17 @@ try {
         $rdpFileText.Text = ''
         if ($computerText.ReadOnly -or -not $fullScreenCheck.Enabled -or
             -not $resolutionCombo.Enabled -or -not $allMonitorsCheck.Enabled -or
-            -not $alwaysAskCredentialsCheck.Enabled -or
             -not $redirectClipboardCheck.Enabled -or
             -not $redirectDrivesCheck.Enabled -or
+            -not $redirectPrintersCheck.Enabled -or
+            -not $redirectMicrophoneCheck.Enabled -or
             -not $redirectLocationCheck.Enabled -or
             -not $redirectComPortsCheck.Enabled -or
             -not $redirectWebAuthnCheck.Enabled -or
             -not $redirectSmartCardsCheck.Enabled -or
-            -not $trustPublisherCheck.Enabled) {
+            -not $trustPublisherCheck.Enabled -or
+            -not $chooseMonitorsButton.Enabled -or
+            $previewImportButton.Enabled) {
             throw 'Setup did not return to editable direct-connection mode.'
         }
     }
@@ -192,8 +227,15 @@ try {
     $shortcutPath = Join-Path $temporaryDirectory 'empty-working-directory.lnk'
     $absoluteTarget = [IO.Path]::GetFullPath($setupPath)
     $profileArguments = '--profile 00000000000000000000000000000000'
-    $createShortcut = $shortcutWriterType.GetMethod(
-        'Create', [Reflection.BindingFlags]'Static,Public,NonPublic')
+    [array]$createShortcutMethods = $shortcutWriterType.GetMethods(
+        [Reflection.BindingFlags]'Static,Public,NonPublic') |
+        Where-Object {
+            $_.Name -eq 'Create' -and $_.GetParameters().Count -eq 4
+        }
+    if ($createShortcutMethods.Count -ne 1) {
+        throw 'The legacy four-argument shortcut writer overload is ambiguous.'
+    }
+    $createShortcut = $createShortcutMethods[0]
     [object[]]$createShortcutArguments = @(
         [string]$shortcutPath,
         [string]$absoluteTarget,

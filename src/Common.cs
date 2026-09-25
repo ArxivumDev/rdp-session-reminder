@@ -93,6 +93,7 @@ internal sealed class ReminderSettings
     public string BannerSize = "Medium";
     public int BannerOpacity = 97;
     public bool IdleDimming;
+    public string ShortcutIcon = "WindowsRemoteDesktop";
 }
 
 internal static class RdpFileTargetReader
@@ -103,16 +104,30 @@ internal static class RdpFileTargetReader
         string alternateAddress = "";
         try
         {
-            foreach (string line in File.ReadAllLines(path))
+            string fullPath = Path.GetFullPath(path);
+            using (FileStream stream = new FileStream(fullPath, FileMode.Open,
+                FileAccess.Read, FileShare.Read))
+            using (StreamReader reader = new StreamReader(stream,
+                Encoding.Default, true))
             {
-                const string fullPrefix = "full address:s:";
-                const string alternatePrefix = "alternate full address:s:";
-                if (line.StartsWith(alternatePrefix,
-                    StringComparison.OrdinalIgnoreCase))
-                    alternateAddress = line.Substring(alternatePrefix.Length).Trim();
-                else if (line.StartsWith(fullPrefix,
-                    StringComparison.OrdinalIgnoreCase))
-                    fullAddress = line.Substring(fullPrefix.Length).Trim();
+                if (stream.Length > 4 * 1024 * 1024)
+                    return "";
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (line.Length > 1024 * 1024)
+                        return "";
+                    const string fullPrefix = "full address:s:";
+                    const string alternatePrefix =
+                        "alternate full address:s:";
+                    if (line.StartsWith(alternatePrefix,
+                        StringComparison.OrdinalIgnoreCase))
+                        alternateAddress = line.Substring(
+                            alternatePrefix.Length).Trim();
+                    else if (line.StartsWith(fullPrefix,
+                        StringComparison.OrdinalIgnoreCase))
+                        fullAddress = line.Substring(fullPrefix.Length).Trim();
+                }
             }
         }
         catch
@@ -137,12 +152,28 @@ internal sealed class RdpProfileOptions
     public bool RedirectComPorts;
     public bool RedirectWebAuthn;
     public bool RedirectSmartCards;
+    public bool RedirectPrinters;
+    public bool RedirectMicrophone;
+    public string SelectedMonitors;
 
     public RdpProfileOptions(string computerName, bool fullScreen,
         int desktopWidth, int desktopHeight, bool useAllMonitors,
         bool alwaysAskForCredentials, bool redirectClipboard,
         bool redirectDrives, bool redirectLocation, bool redirectComPorts,
         bool redirectWebAuthn, bool redirectSmartCards)
+        : this(computerName, fullScreen, desktopWidth, desktopHeight,
+            useAllMonitors, "", alwaysAskForCredentials, redirectClipboard,
+            redirectDrives, redirectLocation, redirectComPorts,
+            redirectWebAuthn, redirectSmartCards, false, false)
+    {
+    }
+
+    public RdpProfileOptions(string computerName, bool fullScreen,
+        int desktopWidth, int desktopHeight, bool useAllMonitors,
+        string selectedMonitors, bool alwaysAskForCredentials,
+        bool redirectClipboard, bool redirectDrives, bool redirectLocation,
+        bool redirectComPorts, bool redirectWebAuthn, bool redirectSmartCards,
+        bool redirectPrinters, bool redirectMicrophone)
     {
         ComputerName = computerName;
         FullScreen = fullScreen;
@@ -156,6 +187,9 @@ internal sealed class RdpProfileOptions
         RedirectComPorts = redirectComPorts;
         RedirectWebAuthn = redirectWebAuthn;
         RedirectSmartCards = redirectSmartCards;
+        RedirectPrinters = redirectPrinters;
+        RedirectMicrophone = redirectMicrophone;
+        SelectedMonitors = selectedMonitors ?? "";
     }
 }
 
@@ -171,10 +205,18 @@ internal static class RdpProfileWriter
             throw new ArgumentOutOfRangeException(
                 "The Remote Desktop resolution must be between 200 and 8192 pixels.");
 
+        string selectedMonitors = NormalizeSelectedMonitors(
+            options.SelectedMonitors);
+        if (selectedMonitors.Length > 0 && !options.UseAllMonitors)
+            throw new ArgumentException(
+                "Selected monitors require multiple-monitor mode.");
+
         string computer = SettingsStore.NormalizeComputerName(options.ComputerName);
         List<string> lines = new List<string>();
         lines.Add("screen mode id:i:" + (options.FullScreen ? "2" : "1"));
         lines.Add("use multimon:i:" + (options.UseAllMonitors ? "1" : "0"));
+        if (selectedMonitors.Length > 0)
+            lines.Add("selectedmonitors:s:" + selectedMonitors);
         lines.Add("desktopwidth:i:" + options.DesktopWidth.ToString(
             CultureInfo.InvariantCulture));
         lines.Add("desktopheight:i:" + options.DesktopHeight.ToString(
@@ -182,7 +224,8 @@ internal static class RdpProfileWriter
         lines.Add("session bpp:i:32");
         lines.Add("compression:i:1");
         lines.Add("keyboardhook:i:2");
-        lines.Add("audiocapturemode:i:0");
+        lines.Add("audiocapturemode:i:" +
+            (options.RedirectMicrophone ? "1" : "0"));
         lines.Add("videoplaybackmode:i:1");
         lines.Add("connection type:i:7");
         lines.Add("networkautodetect:i:1");
@@ -199,9 +242,10 @@ internal static class RdpProfileWriter
         lines.Add("bitmapcachepersistenable:i:1");
         lines.Add("full address:s:" + computer);
         lines.Add("audiomode:i:0");
-        lines.Add("redirectprinters:i:0");
-        if (options.RedirectLocation)
-            lines.Add("redirectlocation:i:1");
+        lines.Add("redirectprinters:i:" +
+            (options.RedirectPrinters ? "1" : "0"));
+        lines.Add("redirectlocation:i:" +
+            (options.RedirectLocation ? "1" : "0"));
         lines.Add("redirectcomports:i:" + (options.RedirectComPorts ? "1" : "0"));
         lines.Add("redirectsmartcards:i:" +
             (options.RedirectSmartCards ? "1" : "0"));
@@ -230,6 +274,12 @@ internal static class RdpProfileWriter
         lines.Add("kdcproxyname:s:");
         lines.Add("enablerdsaadauth:i:0");
         lines.Add("drivestoredirect:s:" + (options.RedirectDrives ? "*" : ""));
+        // Windows defaults MTP/PTP device redirection to all devices for
+        // Remote PC connections. Generated profiles explicitly keep every
+        // unexposed device class off rather than inheriting that default.
+        lines.Add("devicestoredirect:s:");
+        lines.Add("camerastoredirect:s:");
+        lines.Add("usbdevicestoredirect:s:");
         lines.Add("remoteappmousemoveinject:i:1");
         lines.Add("alternate full address:s:" + computer);
 
@@ -237,6 +287,28 @@ internal static class RdpProfileWriter
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
         File.WriteAllLines(path, lines.ToArray(), Encoding.Unicode);
+    }
+
+    internal static string NormalizeSelectedMonitors(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+        string[] pieces = value.Split(',');
+        if (pieces.Length == 0 || pieces.Length > 16)
+            throw new ArgumentException("The selected monitor list is invalid.");
+        HashSet<int> seen = new HashSet<int>();
+        string[] normalized = new string[pieces.Length];
+        for (int index = 0; index < pieces.Length; index++)
+        {
+            int id;
+            if (!int.TryParse(pieces[index].Trim(), NumberStyles.None,
+                    CultureInfo.InvariantCulture, out id) ||
+                id < 0 || id > 255 || !seen.Add(id))
+                throw new ArgumentException(
+                    "The selected monitor list contains an invalid identifier.");
+            normalized[index] = id.ToString(CultureInfo.InvariantCulture);
+        }
+        return string.Join(",", normalized);
     }
 }
 
@@ -506,6 +578,7 @@ internal static class SettingsStore
         string bannerSize = "Medium";
         int bannerOpacity = 97;
         bool idleDimming = false;
+        string shortcutIcon = "WindowsRemoteDesktop";
         bool fullScreen = true;
 
         try
@@ -558,6 +631,8 @@ internal static class SettingsStore
                 }
                 else if (key.Equals("IdleDimming", StringComparison.OrdinalIgnoreCase))
                     idleDimming = value == "1";
+                else if (key.Equals("ShortcutIcon", StringComparison.OrdinalIgnoreCase))
+                    shortcutIcon = value;
             }
         }
         catch
@@ -603,6 +678,7 @@ internal static class SettingsStore
         settings.BannerSize = NormalizeBannerSize(bannerSize);
         settings.BannerOpacity = NormalizeBannerOpacity(bannerOpacity);
         settings.IdleDimming = idleDimming;
+        settings.ShortcutIcon = NormalizeShortcutIcon(shortcutIcon);
         return true;
     }
 
@@ -647,6 +723,8 @@ internal static class SettingsStore
                 settings.BannerOpacity).ToString(
                     CultureInfo.InvariantCulture) + Environment.NewLine +
             "IdleDimming=" + (settings.IdleDimming ? "1" : "0") +
+                Environment.NewLine +
+            "ShortcutIcon=" + NormalizeShortcutIcon(settings.ShortcutIcon) +
                 Environment.NewLine;
 
         string temporary = path + ".new";
@@ -762,6 +840,22 @@ internal static class SettingsStore
     public static int NormalizeBannerOpacity(int value)
     {
         return value >= 50 && value <= 100 ? value : 97;
+    }
+
+    public static string NormalizeShortcutIcon(string value)
+    {
+        string icon = SafeSingleLine(value);
+        string[] allowed = new string[] {
+            "WindowsRemoteDesktop", "Reminder", "Work", "Production",
+            "Test", "Personal"
+        };
+        foreach (string candidate in allowed)
+        {
+            if (string.Equals(icon, candidate,
+                    StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+        return "WindowsRemoteDesktop";
     }
 }
 

@@ -1,10 +1,13 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using Microsoft.Win32.SafeHandles;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -584,6 +587,41 @@ internal sealed class PreparedUpdate
     }
 }
 
+internal sealed class VerifiedUpdateLaunch : IDisposable
+{
+    private FileStream installerLock;
+    private SafeFileHandle directoryLock;
+
+    public string InstallerPath { get; private set; }
+    public string WorkingDirectory { get; private set; }
+
+    internal VerifiedUpdateLaunch(string installerPath, string workingDirectory,
+        FileStream installerStream, SafeFileHandle directoryHandle)
+    {
+        if (installerStream == null)
+            throw new ArgumentNullException("installerStream");
+        if (directoryHandle == null)
+            throw new ArgumentNullException("directoryHandle");
+        InstallerPath = installerPath;
+        WorkingDirectory = workingDirectory;
+        installerLock = installerStream;
+        directoryLock = directoryHandle;
+    }
+
+    public void Dispose()
+    {
+        FileStream stream = installerLock;
+        installerLock = null;
+        if (stream != null)
+            stream.Dispose();
+
+        SafeFileHandle directory = directoryLock;
+        directoryLock = null;
+        if (directory != null)
+            directory.Dispose();
+    }
+}
+
 internal sealed class UpdateClient
 {
     private const string RepositoryApi =
@@ -596,7 +634,55 @@ internal sealed class UpdateClient
     private const int ConnectTimeoutMilliseconds = 15000;
     private const int ReadTimeoutMilliseconds = 30000;
     private const string TemporaryPrefix = "RdpSessionReminderUpdate-";
+    private const uint GenericRead = 0x80000000;
+    private const uint FileReadAttributes = 0x00000080;
+    private const uint OpenExisting = 3;
+    private const uint FileAttributeDirectory = 0x00000010;
+    private const uint FileAttributeReparsePoint = 0x00000400;
+    private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const uint FileFlagSequentialScan = 0x08000000;
+    private const uint VolumeNameDos = 0;
     private readonly string userAgent;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeFileTime
+    {
+        public uint LowDateTime;
+        public uint HighDateTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public NativeFileTime CreationTime;
+        public NativeFileTime LastAccessTime;
+        public NativeFileTime LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName, uint desiredAccess, FileShare shareMode,
+        IntPtr securityAttributes, uint creationDisposition,
+        uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle file, out ByHandleFileInformation information);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(
+        SafeFileHandle file, StringBuilder path, uint pathLength, uint flags);
 
     public UpdateClient(StableVersion currentVersion)
     {
@@ -683,30 +769,76 @@ internal sealed class UpdateClient
         }
     }
 
-    public static void VerifyAgainBeforeLaunch(PreparedUpdate prepared)
+    public static VerifiedUpdateLaunch OpenVerifiedInstallerForLaunch(
+        PreparedUpdate prepared)
     {
         if (prepared == null || string.IsNullOrEmpty(prepared.InstallerPath) ||
             string.IsNullOrEmpty(prepared.ExpectedSha256) ||
-            !File.Exists(prepared.InstallerPath))
+            string.IsNullOrEmpty(prepared.ApiSha256))
             throw new InvalidDataException(
                 "The verified update installer is no longer available.");
-        if (!IsSafeTemporaryUpdateDirectory(prepared.TemporaryDirectory) ||
-            !string.Equals(Path.GetFullPath(prepared.InstallerPath),
-                Path.Combine(Path.GetFullPath(prepared.TemporaryDirectory),
-                    UpdateCatalog.InstallerAssetName),
+
+        string directory;
+        string installer;
+        try
+        {
+            directory = Path.GetFullPath(prepared.TemporaryDirectory)
+                .TrimEnd(Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+            installer = Path.GetFullPath(prepared.InstallerPath);
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidDataException(
+                "The temporary update location is no longer safe.", exception);
+        }
+
+        if (!IsSafeTemporaryUpdateDirectory(directory) ||
+            !string.Equals(installer,
+                Path.Combine(directory, UpdateCatalog.InstallerAssetName),
                 StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException(
                 "The temporary update location is no longer safe.");
-        string actual = ComputeSha256(prepared.InstallerPath);
+
+        SafeFileHandle directoryHandle = null;
+        SafeFileHandle installerHandle = null;
+        FileStream installerStream = null;
         try
         {
+            directoryHandle = OpenPathWithoutFollowingReparsePoint(directory,
+                true);
+            ValidateOpenedPath(directoryHandle, directory, true,
+                "temporary update directory");
+
+            installerHandle = OpenPathWithoutFollowingReparsePoint(installer,
+                false);
+            ValidateOpenedPath(installerHandle, installer, false,
+                "update installer");
+
+            // FileShare.Read on this handle denies writes, deletes, and renames.
+            // The directory handle also denies renaming the containing directory.
+            // Both remain open until Process.Start returns in UpdateUi.
+            installerStream = new FileStream(installerHandle, FileAccess.Read);
+            installerHandle = null; // FileStream owns the native handle now.
+            string actual = ComputeSha256(installerStream);
             UpdateIntegrity.ValidateDownloadedInstaller(
                 prepared.ExpectedSha256, prepared.ApiSha256, actual);
+            installerStream.Position = 0;
+
+            VerifiedUpdateLaunch launch = new VerifiedUpdateLaunch(installer,
+                directory, installerStream, directoryHandle);
+            installerStream = null;
+            directoryHandle = null;
+            return launch;
         }
-        catch
+        finally
         {
-            TryDeleteDirectory(prepared.TemporaryDirectory);
-            throw;
+            if (installerStream != null)
+                installerStream.Dispose();
+            if (installerHandle != null)
+                installerHandle.Dispose();
+            if (directoryHandle != null)
+                directoryHandle.Dispose();
         }
     }
 
@@ -861,9 +993,14 @@ internal sealed class UpdateClient
 
     private static string ComputeSha256(string path)
     {
-        using (SHA256 algorithm = SHA256.Create())
         using (FileStream stream = new FileStream(path, FileMode.Open,
             FileAccess.Read, FileShare.Read))
+            return ComputeSha256(stream);
+    }
+
+    private static string ComputeSha256(Stream stream)
+    {
+        using (SHA256 algorithm = SHA256.Create())
         {
             byte[] hash = algorithm.ComputeHash(stream);
             StringBuilder builder = new StringBuilder(hash.Length * 2);
@@ -871,6 +1008,102 @@ internal sealed class UpdateClient
                 builder.Append(value.ToString("X2", CultureInfo.InvariantCulture));
             return builder.ToString();
         }
+    }
+
+    private static SafeFileHandle OpenPathWithoutFollowingReparsePoint(
+        string path, bool directory)
+    {
+        uint desiredAccess = directory ? FileReadAttributes : GenericRead;
+        FileShare share = directory
+            ? FileShare.Read | FileShare.Write
+            : FileShare.Read;
+        // BACKUP_SEMANTICS lets us open and reject a directory reparse point
+        // even when it appears where the installer file should be.
+        uint flags = FileFlagOpenReparsePoint | FileFlagBackupSemantics;
+        if (!directory)
+            flags |= FileFlagSequentialScan;
+
+        SafeFileHandle handle = CreateFile(path, desiredAccess, share,
+            IntPtr.Zero, OpenExisting, flags, IntPtr.Zero);
+        if (handle == null || handle.IsInvalid)
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (handle != null)
+                handle.Dispose();
+            throw new IOException(
+                "Windows could not lock the verified update location (error " +
+                error.ToString(CultureInfo.InvariantCulture) + ").",
+                new Win32Exception(error));
+        }
+        return handle;
+    }
+
+    private static void ValidateOpenedPath(SafeFileHandle handle,
+        string expectedPath, bool expectDirectory, string description)
+    {
+        ByHandleFileInformation information;
+        if (!GetFileInformationByHandle(handle, out information))
+        {
+            int error = Marshal.GetLastWin32Error();
+            throw new IOException(
+                "Windows could not inspect the " + description + " (error " +
+                error.ToString(CultureInfo.InvariantCulture) + ").",
+                new Win32Exception(error));
+        }
+
+        bool isDirectory =
+            (information.FileAttributes & FileAttributeDirectory) != 0;
+        bool isReparsePoint =
+            (information.FileAttributes & FileAttributeReparsePoint) != 0;
+        if (isReparsePoint || isDirectory != expectDirectory)
+            throw new InvalidDataException(
+                "The " + description +
+                " is a reparse point or has the wrong file type.");
+
+        string finalPath = GetCanonicalPath(handle, description);
+        string expected = Path.GetFullPath(expectedPath).TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string actual = Path.GetFullPath(finalPath).TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                "The " + description + " resolved outside its expected location.");
+    }
+
+    private static string GetCanonicalPath(SafeFileHandle handle,
+        string description)
+    {
+        StringBuilder buffer = new StringBuilder(512);
+        while (true)
+        {
+            uint result = GetFinalPathNameByHandle(handle, buffer,
+                (uint)buffer.Capacity, VolumeNameDos);
+            if (result == 0)
+            {
+                int error = Marshal.GetLastWin32Error();
+                throw new IOException(
+                    "Windows could not resolve the " + description +
+                    " (error " + error.ToString(CultureInfo.InvariantCulture) +
+                    ").", new Win32Exception(error));
+            }
+            if (result < (uint)buffer.Capacity)
+                return NormalizeExtendedPath(buffer.ToString());
+            if (result > 32767)
+                throw new InvalidDataException(
+                    "The " + description + " path is too long.");
+            buffer = new StringBuilder((int)result + 1);
+        }
+    }
+
+    private static string NormalizeExtendedPath(string path)
+    {
+        const string uncPrefix = @"\\?\UNC\";
+        const string localPrefix = @"\\?\";
+        if (path.StartsWith(uncPrefix, StringComparison.OrdinalIgnoreCase))
+            return @"\\" + path.Substring(uncPrefix.Length);
+        if (path.StartsWith(localPrefix, StringComparison.OrdinalIgnoreCase))
+            return path.Substring(localPrefix.Length);
+        return path;
     }
 
     private static void CleanupStaleDownloads()

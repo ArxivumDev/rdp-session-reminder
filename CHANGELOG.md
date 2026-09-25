@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.2.0 - 2026-09-25
+
+- Replace the single setup page with a professional four-step guided workflow
+  and static dimensional branding
+- Add per-user Dark and Light setup themes, default to Dark when
+  `ui-settings.ini` is absent or invalid, and honor Windows High Contrast
+- Add app-scoped cursor resources: a subtle green halo in Dark mode and a pale
+  blue-and-white cloud in Light mode, with no polling timer, system-wide hook,
+  overlay window, background process, or runtime effect
+- Open returning users on Saved connections and support direct double-click,
+  Enter, or **Connect** launches that close the configuration interface
+- Keep credentials in Windows Remote Desktop, use a saved credential when
+  available or prompt when needed for a new direct profile's normal launch,
+  remove the persistent prompt choice from the new-profile UI, and offer
+  **Connect with a different account once** only from the manager's More menu
+- Add saved-profile customization, duplication, shortcut repair, safe profile
+  deletion, and local sanitized diagnostics
+- Add one-time connections that create no desktop shortcut and safely remove
+  their exact temporary profile after the associated launch
+- Add a visual monitor layout, display-number overlays, selected edge-connected
+  monitor subsets, separate reminder-monitor choice, and an `mstsc.exe /l`
+  action for authoritative RDP IDs
+- Add banner labels, presets and custom colors, four corners, edge offset,
+  three text sizes, opacity, test preview, and optional idle dimming
+- Add printer and microphone choices; keep drives, printers, microphone,
+  location, COM ports, and smart cards off by default while enabling clipboard
+  and WebAuthn
+- Explicitly disable unexposed MTP/PTP, camera, and USB device redirection in
+  generated profiles
+- Add locked, bounded import snapshots and a required preview that hides
+  endpoints by default and never displays saved credential values
+- Preserve imported RDP files and their private copies byte-for-byte
+- Add generated Work, Production, Test, Personal, and neutral reminder shortcut
+  icons alongside the recommended Windows Remote Desktop icon
+- Add optional Authenticode build signing with a certificate thumbprint and RFC
+  3161 timestamp; default public CI artifacts remain unsigned without protected
+  signing material
+- Preserve the service-free process model: the manager, editor, and dialogs live
+  in the visible setup process, which ends when setup closes or connects; only
+  the small reminder runs during an RDP launch
+- Harden installer and portable-setup replacement against hard-link write-through
+  and reject reparse-point or directory destinations
+- Keep verified updater directory and installer handles open through launch,
+  hash through the held file handle, and reject reparse-point download paths
+- Preserve generated icons and abandoned one-time profiles by default on
+  uninstall; include exact recognized copies in separately confirmed cleanup
+- Validate stable release tags against the release-note version, attest the CI
+  outputs, and publish those exact artifacts without forcing backport tags latest
+- Clarify that related-project ideas are inspiration only; no TinyRDP, Taskbar
+  Marker, RoyalApps, or MsRdpEx code, dependencies, injections, or hooks are
+  included, and the app does not recolor the Windows taskbar
+
 ## 1.1.0 - 2026-09-25
 
 - Generate one private `.rdp` connection profile for each new direct shortcut

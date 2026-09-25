@@ -20,6 +20,11 @@ internal sealed class BannerSetupPage
     private readonly BannerSampleControl sample;
 
     public BannerSetupPage(Form owner, TabControl tabs)
+        : this(owner, tabs, "4. Reminder")
+    {
+    }
+
+    public BannerSetupPage(Form owner, TabControl tabs, string pageTitle)
     {
         if (owner == null)
             throw new ArgumentNullException("owner");
@@ -27,13 +32,15 @@ internal sealed class BannerSetupPage
             throw new ArgumentNullException("tabs");
         this.owner = owner;
 
-        TabPage page = new TabPage("Reminder appearance");
+        TabPage page = new TabPage(string.IsNullOrWhiteSpace(pageTitle)
+            ? "Reminder appearance"
+            : pageTitle);
         page.Padding = new Padding(12);
         tabs.TabPages.Add(page);
 
-        Label labelHelp = MakeLabel(18, 15, 550, 35,
-            "Optional short label (24 characters). Leave blank to use the full " +
-            "Reminder text from the Connection tab.");
+        Label labelHelp = MakeLabel(18, 15, 265, 39,
+            "Optional short label (24 characters). Recommended: leave blank to " +
+            "use the full Reminder text from step 1.");
         page.Controls.Add(labelHelp);
 
         shortLabel = new TextBox();
@@ -55,8 +62,11 @@ internal sealed class BannerSetupPage
         preset.SelectedIndex = 0;
         preset.SelectedIndexChanged += PresetChanged;
         page.Controls.Add(preset);
+        presetLabel.BringToFront();
+        preset.BringToFront();
 
-        Label backgroundLabel = MakeLabel(18, 94, 116, 22, "Background color");
+        Label backgroundLabel = MakeLabel(18, 94, 116, 22,
+            "Background color");
         page.Controls.Add(backgroundLabel);
         background = CreateColorBox(page, 138, 91, "#182335");
         Button backgroundButton = CreateColorButton(page, 232, 90, "Choose...",
@@ -75,13 +85,14 @@ internal sealed class BannerSetupPage
         corner.Location = new Point(138, 136);
         corner.Size = new Size(135, 25);
         corner.Items.AddRange(new object[] {
-            "BottomRight", "BottomLeft", "TopRight", "TopLeft"
+            "Bottom right", "Bottom left", "Top right", "Top left"
         });
         corner.SelectedIndex = 0;
         corner.SelectedIndexChanged += RefreshSample;
         page.Controls.Add(corner);
 
-        Label offsetLabel = MakeLabel(298, 139, 100, 22, "Vertical offset");
+        Label offsetLabel = MakeLabel(298, 139, 100, 22,
+            "Distance from edge");
         page.Controls.Add(offsetLabel);
         verticalOffset = new NumericUpDown();
         verticalOffset.Location = new Point(401, 136);
@@ -126,18 +137,18 @@ internal sealed class BannerSetupPage
         page.Controls.Add(idleDimming);
 
         sample = new BannerSampleControl();
-        sample.Location = new Point(21, 258);
-        sample.Size = new Size(414, 96);
+        sample.Location = new Point(21, 252);
+        sample.Size = new Size(414, 88);
         page.Controls.Add(sample);
 
         Button testButton = new Button();
-        testButton.Location = new Point(449, 279);
+        testButton.Location = new Point(449, 274);
         testButton.Size = new Size(122, 32);
         testButton.Text = "Test reminder";
         testButton.Click += ShowTestReminder;
         page.Controls.Add(testButton);
 
-        Label lifecycle = MakeLabel(21, 363, 550, 31,
+        Label lifecycle = MakeLabel(21, 348, 550, 42,
             "These choices are saved to this shortcut only. Setup exits after " +
             "creation; only the small reminder runs while that RDP launch is active.");
         lifecycle.ForeColor = Color.FromArgb(75, 75, 75);
@@ -162,7 +173,8 @@ internal sealed class BannerSetupPage
             foreground.Text,
             SettingsStore.GetPresetForeground(settings.BannerPreset));
         settings.BannerCorner = SettingsStore.NormalizeBannerCorner(
-            Convert.ToString(corner.SelectedItem, CultureInfo.InvariantCulture));
+            CornerValue(Convert.ToString(corner.SelectedItem,
+                CultureInfo.InvariantCulture)));
         settings.BannerVerticalOffset = SettingsStore.NormalizeBannerVerticalOffset(
             Decimal.ToInt32(verticalOffset.Value));
         settings.BannerSize = SettingsStore.NormalizeBannerSize(
@@ -185,8 +197,8 @@ internal sealed class BannerSetupPage
         foreground.Text = SettingsStore.NormalizeBannerColor(
             settings.BannerForeground,
             SettingsStore.GetPresetForeground(settings.BannerPreset));
-        SelectValue(corner, SettingsStore.NormalizeBannerCorner(
-            settings.BannerCorner));
+        SelectValue(corner, CornerDisplay(SettingsStore.NormalizeBannerCorner(
+            settings.BannerCorner)));
         verticalOffset.Value = SettingsStore.NormalizeBannerVerticalOffset(
             settings.BannerVerticalOffset);
         SelectValue(size, SettingsStore.NormalizeBannerSize(settings.BannerSize));
@@ -261,9 +273,9 @@ internal sealed class BannerSetupPage
 
     private void CustomColorChanged(object sender, EventArgs eventArgs)
     {
-        sample.BackColor = ParseColor(background.Text,
+        sample.BannerBackColor = ParseColor(background.Text,
             Color.FromArgb(24, 35, 53));
-        sample.ForeColor = ParseColor(foreground.Text, Color.White);
+        sample.BannerForeColor = ParseColor(foreground.Text, Color.White);
         sample.Invalidate();
     }
 
@@ -277,16 +289,18 @@ internal sealed class BannerSetupPage
         sample.SampleSize = Convert.ToString(size.SelectedItem,
             CultureInfo.InvariantCulture);
         sample.SampleOpacity = Decimal.ToInt32(opacity.Value);
-        sample.Corner = Convert.ToString(corner.SelectedItem,
-            CultureInfo.InvariantCulture);
+        sample.Corner = CornerValue(Convert.ToString(corner.SelectedItem,
+            CultureInfo.InvariantCulture));
+        sample.VerticalOffset = Decimal.ToInt32(verticalOffset.Value);
         CustomColorChanged(sender, eventArgs);
     }
 
     private void ShowTestReminder(object sender, EventArgs eventArgs)
     {
         using (BannerTestForm form = new BannerTestForm(
-            sample.SampleText, sample.BackColor, sample.ForeColor,
-            sample.SampleSize, sample.SampleOpacity))
+            sample.SampleText, sample.BannerBackColor,
+            sample.BannerForeColor, sample.SampleSize,
+            sample.SampleOpacity, sample.Corner, sample.VerticalOffset))
         {
             form.ShowDialog(owner);
         }
@@ -306,6 +320,32 @@ internal sealed class BannerSetupPage
         }
         if (combo.Items.Count > 0)
             combo.SelectedIndex = 0;
+    }
+
+    private static string CornerValue(string display)
+    {
+        if (string.Equals(display, "Top left",
+                StringComparison.OrdinalIgnoreCase))
+            return "TopLeft";
+        if (string.Equals(display, "Top right",
+                StringComparison.OrdinalIgnoreCase))
+            return "TopRight";
+        if (string.Equals(display, "Bottom left",
+                StringComparison.OrdinalIgnoreCase))
+            return "BottomLeft";
+        return "BottomRight";
+    }
+
+    private static string CornerDisplay(string value)
+    {
+        string normalized = SettingsStore.NormalizeBannerCorner(value);
+        if (normalized == "TopLeft")
+            return "Top left";
+        if (normalized == "TopRight")
+            return "Top right";
+        if (normalized == "BottomLeft")
+            return "Bottom left";
+        return "Bottom right";
     }
 
     private static Color ParseColor(string value, Color fallback)
@@ -330,42 +370,97 @@ internal sealed class BannerSampleControl : Control
     public string SampleSize = "Medium";
     public int SampleOpacity = 97;
     public string Corner = "BottomRight";
+    public int VerticalOffset = 64;
+    public Color BannerBackColor = Color.FromArgb(24, 35, 53);
+    public Color BannerForeColor = Color.White;
 
     public BannerSampleControl()
     {
         DoubleBuffered = true;
-        BackColor = Color.FromArgb(24, 35, 53);
-        ForeColor = Color.White;
+        BackColor = SetupPalette.Surface;
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
         base.OnPaint(eventArgs);
+        eventArgs.Graphics.SmoothingMode =
+            System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        UiThemePalette palette = SetupPalette.Current;
+        Color desktopTop = palette.IsHighContrast
+            ? SystemColors.Window
+            : palette.IsDark ? Color.FromArgb(38, 55, 80)
+                : Color.FromArgb(236, 242, 249);
+        Color desktopBottom = palette.IsHighContrast
+            ? SystemColors.Window
+            : palette.IsDark ? Color.FromArgb(16, 26, 40)
+                : Color.FromArgb(178, 195, 216);
+        using (System.Drawing.Drawing2D.LinearGradientBrush desktop =
+            new System.Drawing.Drawing2D.LinearGradientBrush(ClientRectangle,
+                desktopTop, desktopBottom,
+                System.Drawing.Drawing2D.LinearGradientMode.Vertical))
+            eventArgs.Graphics.FillRectangle(desktop, ClientRectangle);
+
         int fontSize = SampleSize == "Small" ? 9 :
             SampleSize == "Large" ? 14 : 11;
+        int bannerHeight = SampleSize == "Small" ? 34 :
+            SampleSize == "Large" ? 48 : 40;
+        int bannerWidth = Math.Min(ClientSize.Width - 34,
+            SampleSize == "Large" ? 330 : 292);
+        int scaledOffset = Math.Min(22, Math.Max(0, VerticalOffset / 24));
+        bool left = Corner.EndsWith("Left", StringComparison.Ordinal);
+        bool top = Corner.StartsWith("Top", StringComparison.Ordinal);
+        int x = left ? 10 : ClientSize.Width - bannerWidth - 10;
+        int y = top ? 8 + scaledOffset :
+            ClientSize.Height - bannerHeight - 8 - scaledOffset;
+        y = Math.Max(5, Math.Min(ClientSize.Height - bannerHeight - 5, y));
+        Rectangle banner = new Rectangle(x, y, bannerWidth, bannerHeight);
+        Rectangle shadow = banner;
+        shadow.Offset(2, 3);
+        using (Brush shadowBrush = new SolidBrush(
+            Color.FromArgb(70, 29, 41, 58)))
+            eventArgs.Graphics.FillRectangle(shadowBrush, shadow);
+        using (Brush bannerBrush = new SolidBrush(Color.FromArgb(
+            Math.Max(35, Math.Min(100, SampleOpacity)) * 255 / 100,
+            BannerBackColor)))
+            eventArgs.Graphics.FillRectangle(bannerBrush, banner);
+        using (Pen rim = new Pen(Color.FromArgb(110, 255, 255, 255)))
+            eventArgs.Graphics.DrawRectangle(rim, banner);
         using (Font font = new Font("Segoe UI Semibold", fontSize,
             FontStyle.Bold))
         using (Brush brush = new SolidBrush(Color.FromArgb(
             Math.Max(35, Math.Min(100, SampleOpacity)) * 255 / 100,
-            ForeColor)))
+            BannerForeColor)))
         {
             StringFormat format = new StringFormat();
             format.Alignment = StringAlignment.Center;
             format.LineAlignment = StringAlignment.Center;
             eventArgs.Graphics.DrawString(SampleText, font, brush,
-                ClientRectangle, format);
+                banner, format);
             format.Dispose();
         }
+
+        using (Brush taskbar = new SolidBrush(palette.IsHighContrast
+            ? SystemColors.WindowText
+            : palette.IsDark ? Color.FromArgb(7, 12, 19)
+                : Color.FromArgb(74, 84, 100)))
+            eventArgs.Graphics.FillRectangle(taskbar, 0,
+                Math.Max(0, ClientSize.Height - 4), ClientSize.Width, 4);
     }
 }
 
 internal sealed class BannerTestForm : Form
 {
+    private readonly string corner;
+    private readonly int verticalOffset;
+
     public BannerTestForm(string text, Color background, Color foreground,
-        string size, int opacity)
+        string size, int opacity, string selectedCorner, int selectedOffset)
     {
+        corner = SettingsStore.NormalizeBannerCorner(selectedCorner);
+        verticalOffset = SettingsStore.NormalizeBannerVerticalOffset(
+            selectedOffset);
         Text = "Reminder preview";
-        StartPosition = FormStartPosition.CenterParent;
+        StartPosition = FormStartPosition.Manual;
         FormBorderStyle = FormBorderStyle.FixedToolWindow;
         ShowInTaskbar = false;
         TopMost = true;
@@ -387,5 +482,32 @@ internal sealed class BannerTestForm : Form
 
         ToolTip tip = new ToolTip();
         tip.SetToolTip(label, "Click to close this setup-only preview.");
+        SetupVisualTheme.ApplyCursorCue(this);
+    }
+
+    protected override void OnSystemColorsChanged(EventArgs eventArgs)
+    {
+        base.OnSystemColorsChanged(eventArgs);
+        if (!IsDisposed && !Disposing && Controls.Count > 0)
+            SetupVisualTheme.ApplyCursorCue(this);
+    }
+
+    protected override void OnShown(EventArgs eventArgs)
+    {
+        base.OnShown(eventArgs);
+        Screen screen = Owner == null
+            ? Screen.PrimaryScreen
+            : Screen.FromHandle(Owner.Handle);
+        Rectangle area = screen.WorkingArea;
+        const int margin = 16;
+        bool left = corner.EndsWith("Left", StringComparison.Ordinal);
+        bool top = corner.StartsWith("Top", StringComparison.Ordinal);
+        int x = left ? area.Left + margin : area.Right - Width - margin;
+        int y = top
+            ? area.Top + margin + verticalOffset
+            : area.Bottom - Height - margin - verticalOffset;
+        x = Math.Max(area.Left, Math.Min(area.Right - Width, x));
+        y = Math.Max(area.Top, Math.Min(area.Bottom - Height, y));
+        Location = new Point(x, y);
     }
 }

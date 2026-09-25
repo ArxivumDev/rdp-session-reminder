@@ -10,8 +10,10 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 $resolvedRoot = [IO.Path]::GetFullPath($RepoRoot)
 $sourcePath = Join-Path $resolvedRoot 'src\AdvancedSetupSupport.cs'
 $commonPath = Join-Path $resolvedRoot 'src\Common.cs'
+$visualsPath = Join-Path $resolvedRoot 'src\SetupVisuals.cs'
 if (-not (Test-Path -LiteralPath $sourcePath) -or
-    -not (Test-Path -LiteralPath $commonPath)) {
+    -not (Test-Path -LiteralPath $commonPath) -or
+    -not (Test-Path -LiteralPath $visualsPath)) {
     throw 'Advanced setup source files were not found.'
 }
 
@@ -34,7 +36,7 @@ try {
     & $compiler /nologo /target:library /optimize+ /platform:anycpu `
         /reference:System.dll /reference:System.Core.dll `
         /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
-        /out:$assemblyPath $commonPath $sourcePath
+        /out:$assemblyPath $commonPath $visualsPath $sourcePath
     if ($LASTEXITCODE -ne 0) {
         throw 'Advanced setup support did not compile.'
     }
@@ -44,11 +46,21 @@ try {
     $assembly = [Reflection.Assembly]::Load(
         [IO.File]::ReadAllBytes($assemblyPath))
     $monitorType = $assembly.GetType('MonitorDescriptor', $true)
+    $screenSourceType = $assembly.GetType(
+        'ScreenMonitorTopologySource', $true)
     $selectionType = $assembly.GetType('MonitorSelection', $true)
     $resourceType = $assembly.GetType('RdpResourceOptions', $true)
     $previewType = $assembly.GetType('RdpImportPreview', $true)
     $iconCatalogType = $assembly.GetType('ShortcutIconCatalog', $true)
     $iconKindType = $assembly.GetType('ShortcutIconKind', $true)
+
+    $mapMonitorId = $screenSourceType.GetMethod(
+        'GetMstscId', [Reflection.BindingFlags]'Static,Public,NonPublic')
+    if ($mapMonitorId.Invoke($null, @('\\.\DISPLAY1', 9)) -ne 9 -or
+        $mapMonitorId.Invoke($null, @('\\.\DISPLAY3', 9)) -ne 9 -or
+        $mapMonitorId.Invoke($null, @('unrecognized', 4)) -ne 4) {
+        throw 'RDP monitor IDs must use native enumeration order, not DISPLAYn text.'
+    }
 
     $monitorListType = [Collections.Generic.List``1].MakeGenericType($monitorType)
     $monitors = [Activator]::CreateInstance($monitorListType)
@@ -156,7 +168,10 @@ try {
         'redirectclipboard:i:1',
         'redirectwebauthn:i:1',
         'redirectprinters:i:0',
-        'audiocapturemode:i:0'
+        'audiocapturemode:i:0',
+        'devicestoredirect:s:',
+        'camerastoredirect:s:',
+        'usbdevicestoredirect:s:'
     )) {
         if ($defaultSettings -notcontains $requiredSetting) {
             throw "Resource defaults omitted '$requiredSetting'."
@@ -187,6 +202,9 @@ try {
         'redirectsmartcards:i:1',
         'redirectwebauthn:i:1',
         'redirectlocation:i:1',
+        'devicestoredirect:s:*',
+        'camerastoredirect:s:',
+        'usbdevicestoredirect:s:',
         'authentication level:i:0',
         'enablecredsspsupport:i:0'
     ), [Text.Encoding]::Unicode)
@@ -209,6 +227,9 @@ try {
         -not $preview.Resources.RedirectPrinters -or
         -not $preview.Resources.RedirectMicrophone -or
         -not $preview.Resources.RedirectDrives -or
+        -not $preview.Resources.RedirectMtpPtpDevices -or
+        $preview.Resources.RedirectCameras -or
+        $preview.Resources.RedirectUsbDevices -or
         $preview.AuthenticationWarnings.Count -lt 3) {
         throw 'RDP import preview did not summarize the requested settings.'
     }
@@ -236,6 +257,33 @@ try {
         -not $revealedDisplay.Contains($secretGateway) -or
         $revealedDisplay.Contains($secretPasswordBlob)) {
         throw 'Explicit endpoint reveal must never reveal a password value.'
+    }
+
+    $unspecifiedPath = Join-Path $temporaryDirectory 'unspecified.rdp'
+    [IO.File]::WriteAllLines($unspecifiedPath, @(
+        'full address:s:host.example',
+        'authentication level:i:1'
+    ), [Text.Encoding]::Unicode)
+    $unspecified = $readDefault.Invoke($null, @([string]$unspecifiedPath))
+    $unspecifiedDisplay = [string]::Join(
+        "`n", [string[]]$unspecified.GetDisplayLines())
+    if ($null -ne $unspecified.Resources.RedirectComPorts -or
+        $null -ne $unspecified.Resources.RedirectSmartCards -or
+        $null -ne $unspecified.Resources.RedirectWebAuthn -or
+        $null -ne $unspecified.Resources.RedirectMtpPtpDevices -or
+        $unspecified.ServerAuthenticationSummary -notlike 'Do not connect*' -or
+        $unspecifiedDisplay -notlike '*Ports*Windows default is enabled*') {
+        throw 'Unspecified resource defaults or authentication level 1 were misreported.'
+    }
+
+    [IO.File]::WriteAllLines($unspecifiedPath, @(
+        'full address:s:host.example',
+        'authentication level:i:2'
+    ), [Text.Encoding]::Unicode)
+    $warnAuthentication = $readDefault.Invoke(
+        $null, @([string]$unspecifiedPath))
+    if ($warnAuthentication.ServerAuthenticationSummary -notlike 'Warn*') {
+        throw 'Authentication level 2 must warn and let the user decide.'
     }
 
     $choices = $iconCatalogType.GetMethod(

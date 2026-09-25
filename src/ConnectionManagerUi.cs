@@ -227,9 +227,31 @@ internal static class ConnectionProfileCatalog
         if (!TryResolveDirectProfileDirectory(root, profileId,
                 out profileDirectory) || !Directory.Exists(profileDirectory))
             throw new ArgumentException("The profile is not a canonical app profile.");
+        if (IsReparsePoint(profileDirectory))
+            throw new IOException("A profile reparse point will not be deleted.");
 
-        ValidateTreeContainsNoReparsePoints(profileDirectory);
-        Directory.Delete(profileDirectory, true);
+        string settingsPath = Path.Combine(profileDirectory,
+            AppPaths.SettingsFileName);
+        string rdpPath = Path.Combine(profileDirectory,
+            AppPaths.ConnectionFileName);
+        foreach (string entry in Directory.GetFileSystemEntries(
+            profileDirectory))
+        {
+            if (!PathsEqual(entry, settingsPath) && !PathsEqual(entry, rdpPath))
+                throw new IOException(
+                    "The profile contains an unrecognized file or folder and " +
+                    "was not deleted. Remove that item manually after reviewing it.");
+            if (Directory.Exists(entry) || IsReparsePoint(entry) ||
+                !File.Exists(entry))
+                throw new IOException(
+                    "A managed profile entry is not a regular app-owned file and " +
+                    "was not deleted.");
+        }
+        if (File.Exists(settingsPath))
+            File.Delete(settingsPath);
+        if (File.Exists(rdpPath))
+            File.Delete(rdpPath);
+        Directory.Delete(profileDirectory, false);
     }
 
     private static ManagedConnectionInfo ReadProfile(string root,
@@ -580,20 +602,24 @@ internal static class ConnectionDiagnosticsBuilder
         report.AppendLine("Copied RDP exists: " + YesNo(profile.RdpExists));
         report.AppendLine("Copied RDP path: %LOCALAPPDATA%\\RdpSessionReminder" +
             "\\profiles\\<PROFILE-ID>\\connection.rdp");
-        report.AppendLine("Copied RDP contents parsed: No (hashed as bytes only)");
+        report.AppendLine("Copied RDP privacy scan: selected-monitor IDs only; " +
+            "endpoint, user, reminder, and credential fields are not read for diagnostics");
         report.AppendLine("Copied RDP SHA-256: " + GetRdpHash(profile));
         report.AppendLine("Reminder runtime: " +
             SanitizeExpectedRuntimePath(context.RuntimePath));
         report.AppendLine("Windows RDP client: " +
             SanitizeMstscPath(context.MstscPath));
-        report.AppendLine("Executable signature valid: " +
+        report.AppendLine("Reminder runtime locally trusted " +
+            "(cached revocation check): " +
             NullableYesNo(context.ApplicationSignatureValid));
         report.AppendLine("RDP publisher trusted: " +
             NullableYesNo(context.RdpPublisherTrusted));
-        report.AppendLine("Update available: " +
-            NullableYesNo(context.UpdateAvailable));
-        report.AppendLine("Latest version: " +
-            SafeVersion(context.LatestVersion));
+        if (context.UpdateAvailable.HasValue)
+            report.AppendLine("Update available: " +
+                NullableYesNo(context.UpdateAvailable));
+        if (!string.IsNullOrWhiteSpace(context.LatestVersion))
+            report.AppendLine("Latest version: " +
+                SafeVersion(context.LatestVersion));
         AppendMonitorStatus(report, context.SelectedMonitorIds,
             context.AvailableMonitorIds);
         AppendShortcutStatus(report, profile, context);
@@ -924,14 +950,21 @@ internal sealed class ConnectionManagerController
     private readonly Button connectButton;
     private readonly Button editButton;
     private readonly Button duplicateButton;
-    private readonly Button repairButton;
-    private readonly Button deleteButton;
-    private readonly Button diagnosticsButton;
+    private readonly Button moreButton;
+    private readonly ToolStripMenuItem differentAccountMenuItem;
+    private readonly ToolStripMenuItem repairMenuItem;
+    private readonly ToolStripMenuItem diagnosticsMenuItem;
+    private readonly ToolStripMenuItem deleteMenuItem;
     private bool busy;
 
     public TabPage Page
     {
         get { return page; }
+    }
+
+    public bool HasConnections
+    {
+        get { return connections != null && connections.Items.Count > 0; }
     }
 
     public ConnectionManagerController(Form ownerForm, TabControl tabs,
@@ -940,7 +973,7 @@ internal sealed class ConnectionManagerController
         owner = ownerForm;
         options = managerOptions;
 
-        page = new TabPage("Connections");
+        page = new TabPage("Saved connections");
         page.Padding = new Padding(10);
         tabs.TabPages.Add(page);
 
@@ -951,56 +984,77 @@ internal sealed class ConnectionManagerController
         explanation.Anchor = AnchorStyles.Top | AnchorStyles.Left |
             AnchorStyles.Right;
         explanation.Text =
-            "Manage shortcuts created by this app. Setup is only the " +
-            "configuration interface and uses no memory after it closes; " +
-            "connections use the small reminder launcher and Windows Remote Desktop.";
+            "Double-click a saved computer or select Connect for a direct RDP " +
+            "session. Windows uses a saved account when available and prompts " +
+            "if needed; this interface closes completely after starting it.";
         page.Controls.Add(explanation);
 
         connections = new ListView();
         connections.Location = new Point(12, 62);
         connections.Size = new Size(550, 210);
-        connections.Anchor = AnchorStyles.Top | AnchorStyles.Bottom |
-            AnchorStyles.Left | AnchorStyles.Right;
+        connections.Anchor = AnchorStyles.Top | AnchorStyles.Left |
+            AnchorStyles.Right;
         connections.View = View.Details;
         connections.FullRowSelect = true;
         connections.HideSelection = false;
         connections.MultiSelect = false;
-        connections.Columns.Add("Connection", 270);
-        connections.Columns.Add("State", 145);
-        connections.Columns.Add("Profile", 105);
+        connections.Columns.Add("Connection", 220);
+        connections.Columns.Add("Computer", 200);
+        connections.Columns.Add("State", 100);
         connections.SelectedIndexChanged += SelectionChanged;
         connections.DoubleClick += ConnectClicked;
+        connections.KeyDown += delegate(object sender, KeyEventArgs eventArgs)
+        {
+            if (eventArgs.KeyCode != Keys.Enter)
+                return;
+            ConnectClicked(sender, EventArgs.Empty);
+            eventArgs.Handled = true;
+            eventArgs.SuppressKeyPress = true;
+        };
         page.Controls.Add(connections);
 
         FlowLayoutPanel actions = new FlowLayoutPanel();
         actions.Location = new Point(9, 280);
-        actions.Size = new Size(556, 68);
-        actions.Anchor = AnchorStyles.Bottom | AnchorStyles.Left |
+        actions.Size = new Size(556, 38);
+        actions.Anchor = AnchorStyles.Top | AnchorStyles.Left |
             AnchorStyles.Right;
         actions.WrapContents = true;
         actions.AutoSize = false;
         page.Controls.Add(actions);
 
         connectButton = MakeButton("Connect", ConnectClicked, 80);
-        editButton = MakeButton("Edit", EditClicked, 66);
+        editButton = MakeButton("Customize reminder...", EditClicked, 145);
         duplicateButton = MakeButton("Duplicate", DuplicateClicked, 82);
-        repairButton = MakeButton("Repair shortcut", RepairClicked, 108);
-        diagnosticsButton = MakeButton("Diagnostics", DiagnosticsClicked, 92);
-        deleteButton = MakeButton("Delete", DeleteClicked, 66);
+        moreButton = MakeButton("More...", ShowMoreMenu, 78);
+        ContextMenuStrip moreMenu = new ContextMenuStrip();
+        differentAccountMenuItem = new ToolStripMenuItem(
+            "Connect with a different account once...");
+        repairMenuItem = new ToolStripMenuItem("Repair desktop shortcut");
+        diagnosticsMenuItem = new ToolStripMenuItem("Create sanitized diagnostics");
+        deleteMenuItem = new ToolStripMenuItem("Delete app profile...");
+        differentAccountMenuItem.Click += DifferentAccountClicked;
+        repairMenuItem.Click += RepairClicked;
+        diagnosticsMenuItem.Click += DiagnosticsClicked;
+        deleteMenuItem.Click += DeleteClicked;
+        moreMenu.Items.Add(differentAccountMenuItem);
+        moreMenu.Items.Add(new ToolStripSeparator());
+        moreMenu.Items.Add(repairMenuItem);
+        moreMenu.Items.Add(diagnosticsMenuItem);
+        moreMenu.Items.Add(new ToolStripSeparator());
+        moreMenu.Items.Add(deleteMenuItem);
+        moreButton.ContextMenuStrip = moreMenu;
         Button refreshButton = MakeButton("Refresh", RefreshClicked, 72);
         actions.Controls.Add(connectButton);
         actions.Controls.Add(editButton);
         actions.Controls.Add(duplicateButton);
-        actions.Controls.Add(repairButton);
-        actions.Controls.Add(diagnosticsButton);
-        actions.Controls.Add(deleteButton);
+        actions.Controls.Add(moreButton);
         actions.Controls.Add(refreshButton);
 
         status = new Label();
         status.AutoEllipsis = true;
-        status.Location = new Point(12, 352);
+        status.Location = new Point(12, 326);
         status.Size = new Size(550, 23);
-        status.Anchor = AnchorStyles.Bottom | AnchorStyles.Left |
+        status.Anchor = AnchorStyles.Top | AnchorStyles.Left |
             AnchorStyles.Right;
         page.Controls.Add(status);
 
@@ -1022,8 +1076,11 @@ internal sealed class ConnectionManagerController
             foreach (ManagedConnectionInfo profile in profiles)
             {
                 ListViewItem item = new ListViewItem(profile.DisplayName);
+                item.SubItems.Add(profile.SettingsValid &&
+                        profile.Settings != null
+                    ? profile.Settings.ComputerName
+                    : "Unavailable");
                 item.SubItems.Add(profile.StateText);
-                item.SubItems.Add(profile.ProfileId.Substring(0, 8));
                 item.Tag = profile;
                 connections.Items.Add(item);
                 if (string.Equals(profile.ProfileId, selectedId,
@@ -1079,10 +1136,20 @@ internal sealed class ConnectionManagerController
         connectButton.Enabled = hasSelection && selected.Ready;
         editButton.Enabled = hasSelection && options.EditRequested != null;
         duplicateButton.Enabled = hasSelection && selected.Ready;
-        repairButton.Enabled = hasSelection && selected.Ready &&
+        moreButton.Enabled = hasSelection;
+        differentAccountMenuItem.Enabled = hasSelection && selected.Ready;
+        repairMenuItem.Enabled = hasSelection && selected.Ready &&
             options.RepairShortcutRequested != null;
-        diagnosticsButton.Enabled = hasSelection;
-        deleteButton.Enabled = hasSelection;
+        diagnosticsMenuItem.Enabled = hasSelection;
+        deleteMenuItem.Enabled = hasSelection;
+    }
+
+    private void ShowMoreMenu(object sender, EventArgs eventArgs)
+    {
+        if (!moreButton.Enabled || moreButton.ContextMenuStrip == null)
+            return;
+        moreButton.ContextMenuStrip.Show(moreButton,
+            new Point(0, moreButton.Height));
     }
 
     private void ConnectClicked(object sender, EventArgs eventArgs)
@@ -1096,7 +1163,7 @@ internal sealed class ConnectionManagerController
             if (options.ConnectRequested != null)
                 options.ConnectRequested(selected);
             else
-                StartReminder(selected);
+                StartReminder(selected, false);
             status.Text = "Connection started. Setup can close completely now.";
             if (options.CloseSetupAfterConnect)
                 closeAfterStart = true;
@@ -1111,6 +1178,25 @@ internal sealed class ConnectionManagerController
         if (selected == null || options.EditRequested == null)
             return;
         RunAction(delegate { options.EditRequested(selected); });
+    }
+
+    private void DifferentAccountClicked(object sender, EventArgs eventArgs)
+    {
+        ManagedConnectionInfo selected = SelectedProfile;
+        if (selected == null || !selected.Ready)
+            return;
+
+        bool closeAfterStart = false;
+        RunAction(delegate
+        {
+            StartReminder(selected, true);
+            status.Text = "Connection started. Windows Remote Desktop will ask " +
+                "which account to use for this launch.";
+            if (options.CloseSetupAfterConnect)
+                closeAfterStart = true;
+        });
+        if (closeAfterStart)
+            owner.Close();
     }
 
     private void DuplicateClicked(object sender, EventArgs eventArgs)
@@ -1205,7 +1291,8 @@ internal sealed class ConnectionManagerController
         RefreshProfiles();
     }
 
-    private void StartReminder(ManagedConnectionInfo profile)
+    private void StartReminder(ManagedConnectionInfo profile,
+        bool promptCredentials)
     {
         string runtime = string.IsNullOrEmpty(options.RuntimePath)
             ? AppPaths.RuntimePath
@@ -1216,7 +1303,8 @@ internal sealed class ConnectionManagerController
 
         ProcessStartInfo startInfo = new ProcessStartInfo();
         startInfo.FileName = runtime;
-        startInfo.Arguments = "--profile " + profile.ProfileId;
+        startInfo.Arguments = "--profile " + profile.ProfileId +
+            (promptCredentials ? " --prompt-credentials" : "");
         startInfo.UseShellExecute = false;
         Process.Start(startInfo);
     }
@@ -1382,6 +1470,7 @@ internal static class DuplicateNameDialog
             dialog.Controls.Add(name);
             dialog.Controls.Add(create);
             dialog.Controls.Add(cancel);
+            SetupVisualTheme.Apply(dialog);
 
             if (dialog.ShowDialog(owner) != DialogResult.OK)
                 return null;
@@ -1451,6 +1540,7 @@ internal sealed class DiagnosticsReportForm : Form
         Controls.Add(close);
         AcceptButton = close;
         CancelButton = close;
+        SetupVisualTheme.Apply(this);
     }
 
     private void CopyClicked(object sender, EventArgs eventArgs)

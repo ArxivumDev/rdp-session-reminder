@@ -18,6 +18,7 @@ $integrityType = $assembly.GetType('UpdateIntegrity', $true)
 $preferenceType = $assembly.GetType('UpdatePreferences', $true)
 $preferenceStoreType = $assembly.GetType('UpdatePreferenceStore', $true)
 $preparedType = $assembly.GetType('PreparedUpdate', $true)
+$verifiedLaunchType = $assembly.GetType('VerifiedUpdateLaunch', $true)
 $updateClientType = $assembly.GetType('UpdateClient', $true)
 
 $json = @'
@@ -252,6 +253,218 @@ try {
 finally {
     if ([IO.Directory]::Exists($safeDirectory)) {
         [IO.Directory]::Delete($safeDirectory, $true)
+    }
+}
+
+$openVerifiedInstaller = $updateClientType.GetMethod(
+    'OpenVerifiedInstallerForLaunch', $allStatic)
+$installerName = 'RdpSessionReminder-Installer.exe'
+$lockedDirectory = Join-Path ([IO.Path]::GetTempPath()) (
+    'RdpSessionReminderUpdate-' + [guid]::NewGuid().ToString('N'))
+$lockedInstaller = Join-Path $lockedDirectory $installerName
+$replacementPath = Join-Path $lockedDirectory 'replacement.exe'
+$replacementBackupPath = Join-Path $lockedDirectory 'replacement-backup.exe'
+$renamedDirectory = $lockedDirectory + '-renamed'
+$launchGuard = $null
+try {
+    [IO.Directory]::CreateDirectory($lockedDirectory) | Out-Null
+    $originalBytes = [Text.Encoding]::UTF8.GetBytes(
+        'verified installer bytes for launch-lock testing')
+    [IO.File]::WriteAllBytes($lockedInstaller, $originalBytes)
+    $originalHash = (Get-FileHash -LiteralPath $lockedInstaller `
+        -Algorithm SHA256).Hash
+
+    $lockedPrepared = [Activator]::CreateInstance($preparedType, $true)
+    $preparedType.GetField('TemporaryDirectory', $allInstance).SetValue(
+        $lockedPrepared, $lockedDirectory)
+    $preparedType.GetField('InstallerPath', $allInstance).SetValue(
+        $lockedPrepared, $lockedInstaller)
+    $preparedType.GetField('ExpectedSha256', $allInstance).SetValue(
+        $lockedPrepared, $originalHash)
+    $preparedType.GetField('ApiSha256', $allInstance).SetValue(
+        $lockedPrepared, $originalHash)
+
+    $launchGuard = $openVerifiedInstaller.Invoke($null, @($lockedPrepared))
+    if ($null -eq $launchGuard -or
+        $launchGuard.GetType() -ne $verifiedLaunchType) {
+        throw 'The updater did not return a verified launch guard.'
+    }
+
+    $writeWasBlocked = $false
+    try {
+        [IO.File]::WriteAllText($lockedInstaller, 'tampered')
+    }
+    catch [IO.IOException] {
+        $writeWasBlocked = $true
+    }
+    catch [UnauthorizedAccessException] {
+        $writeWasBlocked = $true
+    }
+    if (-not $writeWasBlocked) {
+        throw 'The verified installer remained writable before launch.'
+    }
+
+    [IO.File]::WriteAllText($replacementPath, 'replacement')
+    $replacementWasBlocked = $false
+    try {
+        [IO.File]::Replace(
+            $replacementPath, $lockedInstaller, $replacementBackupPath)
+    }
+    catch [IO.IOException] {
+        $replacementWasBlocked = $true
+    }
+    catch [UnauthorizedAccessException] {
+        $replacementWasBlocked = $true
+    }
+    if (-not $replacementWasBlocked) {
+        throw 'The verified installer could be replaced before launch.'
+    }
+
+    $directoryRenameWasBlocked = $false
+    try {
+        [IO.Directory]::Move($lockedDirectory, $renamedDirectory)
+    }
+    catch [IO.IOException] {
+        $directoryRenameWasBlocked = $true
+    }
+    catch [UnauthorizedAccessException] {
+        $directoryRenameWasBlocked = $true
+    }
+    if (-not $directoryRenameWasBlocked) {
+        throw 'The verified installer directory could be replaced before launch.'
+    }
+
+    $launchGuard.Dispose()
+    $launchGuard = $null
+    [IO.File]::WriteAllText($lockedInstaller, 'tampered after verification')
+    try {
+        $openVerifiedInstaller.Invoke($null, @($lockedPrepared)) | Out-Null
+        throw 'Post-verification installer tampering was accepted.'
+    }
+    catch {
+        if ($_.Exception.InnerException -isnot [IO.InvalidDataException]) {
+            throw
+        }
+    }
+}
+finally {
+    if ($null -ne $launchGuard) {
+        $launchGuard.Dispose()
+    }
+    if ([IO.Directory]::Exists($lockedDirectory)) {
+        [IO.Directory]::Delete($lockedDirectory, $true)
+    }
+    if ([IO.Directory]::Exists($renamedDirectory)) {
+        [IO.Directory]::Delete($renamedDirectory, $true)
+    }
+}
+
+$launchTestDirectory = Join-Path ([IO.Path]::GetTempPath()) (
+    'RdpSessionReminderUpdate-' + [guid]::NewGuid().ToString('N'))
+$launchTestInstaller = Join-Path $launchTestDirectory $installerName
+$launchTestGuard = $null
+try {
+    [IO.Directory]::CreateDirectory($launchTestDirectory) | Out-Null
+    Copy-Item -LiteralPath (Join-Path ([IO.Path]::GetFullPath($DistDirectory)) `
+        $installerName) -Destination $launchTestInstaller
+    $launchTestHash = (Get-FileHash -LiteralPath $launchTestInstaller `
+        -Algorithm SHA256).Hash
+    $launchPrepared = [Activator]::CreateInstance($preparedType, $true)
+    $preparedType.GetField('TemporaryDirectory', $allInstance).SetValue(
+        $launchPrepared, $launchTestDirectory)
+    $preparedType.GetField('InstallerPath', $allInstance).SetValue(
+        $launchPrepared, $launchTestInstaller)
+    $preparedType.GetField('ExpectedSha256', $allInstance).SetValue(
+        $launchPrepared, $launchTestHash)
+    $preparedType.GetField('ApiSha256', $allInstance).SetValue(
+        $launchPrepared, $launchTestHash)
+    $launchTestGuard = $openVerifiedInstaller.Invoke($null, @($launchPrepared))
+
+    $processInfo = [Diagnostics.ProcessStartInfo]::new()
+    $processInfo.FileName = $launchTestInstaller
+    $processInfo.Arguments = '--self-test'
+    $processInfo.WorkingDirectory = $launchTestDirectory
+    $processInfo.UseShellExecute = $false
+    $testProcess = [Diagnostics.Process]::Start($processInfo)
+    try {
+        if (-not $testProcess.WaitForExit(30000) -or $testProcess.ExitCode -ne 0) {
+            throw 'Windows could not launch the installer while its verified handles were held.'
+        }
+    }
+    finally {
+        $testProcess.Dispose()
+    }
+}
+finally {
+    if ($null -ne $launchTestGuard) {
+        $launchTestGuard.Dispose()
+    }
+    if ([IO.Directory]::Exists($launchTestDirectory)) {
+        [IO.Directory]::Delete($launchTestDirectory, $true)
+    }
+}
+
+$reparseDirectory = Join-Path ([IO.Path]::GetTempPath()) (
+    'RdpSessionReminderUpdate-' + [guid]::NewGuid().ToString('N'))
+$reparseInstaller = Join-Path $reparseDirectory $installerName
+$reparseTarget = Join-Path ([IO.Path]::GetTempPath()) (
+    'RdpSessionReminderUpdateTarget-' + [guid]::NewGuid().ToString('N'))
+$reparseIsDirectory = $false
+try {
+    [IO.Directory]::CreateDirectory($reparseDirectory) | Out-Null
+    [IO.File]::WriteAllText($reparseTarget, 'reparse target')
+    try {
+        New-Item -ItemType SymbolicLink -Path $reparseInstaller `
+            -Target $reparseTarget -ErrorAction Stop | Out-Null
+    }
+    catch {
+        if ([IO.File]::Exists($reparseTarget)) {
+            [IO.File]::Delete($reparseTarget)
+        }
+        [IO.Directory]::CreateDirectory($reparseTarget) | Out-Null
+        New-Item -ItemType Junction -Path $reparseInstaller `
+            -Target $reparseTarget -ErrorAction Stop | Out-Null
+        $reparseIsDirectory = $true
+    }
+    $attributes = [IO.File]::GetAttributes($reparseInstaller)
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+        throw 'The updater reparse test did not create a reparse point.'
+    }
+
+    $reparsePrepared = [Activator]::CreateInstance($preparedType, $true)
+    $preparedType.GetField('TemporaryDirectory', $allInstance).SetValue(
+        $reparsePrepared, $reparseDirectory)
+    $preparedType.GetField('InstallerPath', $allInstance).SetValue(
+        $reparsePrepared, $reparseInstaller)
+    $preparedType.GetField('ExpectedSha256', $allInstance).SetValue(
+        $reparsePrepared, $upperHash)
+    $preparedType.GetField('ApiSha256', $allInstance).SetValue(
+        $reparsePrepared, $upperHash)
+    try {
+        $openVerifiedInstaller.Invoke($null, @($reparsePrepared)) | Out-Null
+        throw 'An installer-path reparse point was accepted for launch.'
+    }
+    catch {
+        if ($_.Exception.InnerException -isnot [IO.InvalidDataException]) {
+            throw
+        }
+    }
+}
+finally {
+    if ($reparseIsDirectory -and [IO.Directory]::Exists($reparseInstaller)) {
+        [IO.Directory]::Delete($reparseInstaller)
+    }
+    elseif ([IO.File]::Exists($reparseInstaller)) {
+        [IO.File]::Delete($reparseInstaller)
+    }
+    if ([IO.Directory]::Exists($reparseDirectory)) {
+        [IO.Directory]::Delete($reparseDirectory, $true)
+    }
+    if ([IO.Directory]::Exists($reparseTarget)) {
+        [IO.Directory]::Delete($reparseTarget, $true)
+    }
+    elseif ([IO.File]::Exists($reparseTarget)) {
+        [IO.File]::Delete($reparseTarget)
     }
 }
 

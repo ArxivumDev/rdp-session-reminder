@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
@@ -40,8 +41,9 @@ internal sealed class MonitorDescriptor
     public string GetDisplayLabel()
     {
         return string.Format(CultureInfo.CurrentCulture,
-            "{0} - {1} x {2}{3}", DisplayNumber, Bounds.Width, Bounds.Height,
-            IsPrimary ? " (primary)" : "");
+            "Display {0} - {1} x {2}{3} (RDP ID {4})", DisplayNumber,
+            Bounds.Width, Bounds.Height, IsPrimary ? " (primary)" : "",
+            MstscId);
     }
 
     public override string ToString()
@@ -57,17 +59,61 @@ internal interface IMonitorTopologySource
 
 internal sealed class ScreenMonitorTopologySource : IMonitorTopologySource
 {
+    private delegate bool MonitorEnumProcedure(IntPtr monitor,
+        IntPtr deviceContext, IntPtr rectangle, IntPtr data);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(IntPtr deviceContext,
+        IntPtr clipRectangle, MonitorEnumProcedure procedure, IntPtr data);
+
     public IList<MonitorDescriptor> GetMonitors()
     {
         List<MonitorDescriptor> monitors = new List<MonitorDescriptor>();
-        Screen[] screens = Screen.AllScreens;
-        for (int index = 0; index < screens.Length; index++)
+        HashSet<string> devices = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
+        MonitorEnumProcedure callback = delegate(IntPtr monitor,
+            IntPtr deviceContext, IntPtr rectangle, IntPtr data)
         {
-            Screen screen = screens[index];
-            monitors.Add(new MonitorDescriptor(index, screen.DeviceName,
+            Screen screen = Screen.FromHandle(monitor);
+            if (screen == null || screen.Bounds.Width <= 0 ||
+                screen.Bounds.Height <= 0 || !devices.Add(screen.DeviceName))
+                return true;
+            monitors.Add(new MonitorDescriptor(
+                monitors.Count, screen.DeviceName,
                 screen.Bounds, screen.WorkingArea, screen.Primary));
+            return true;
+        };
+        bool enumerated = false;
+        try
+        {
+            enumerated = EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+                callback, IntPtr.Zero);
+        }
+        catch
+        {
+            enumerated = false;
+        }
+        GC.KeepAlive(callback);
+
+        if (!enumerated || monitors.Count == 0)
+        {
+            monitors.Clear();
+            Screen[] screens = Screen.AllScreens;
+            for (int index = 0; index < screens.Length; index++)
+            {
+                Screen screen = screens[index];
+                monitors.Add(new MonitorDescriptor(index, screen.DeviceName,
+                    screen.Bounds, screen.WorkingArea, screen.Primary));
+            }
         }
         return monitors;
+    }
+
+    // Kept as a small compatibility seam for tests and older callers. RDP IDs
+    // are based on the native monitor enumeration order, never DISPLAYn text.
+    internal static int GetMstscId(string deviceName, int fallback)
+    {
+        return Math.Max(0, fallback);
     }
 }
 
@@ -274,7 +320,7 @@ internal sealed class MonitorLayoutControl : Control
     {
         DoubleBuffered = true;
         MinimumSize = new Size(360, 180);
-        BackColor = Color.White;
+        BackColor = SetupPalette.Input;
         SetStyle(ControlStyles.ResizeRedraw, true);
     }
 
@@ -368,16 +414,20 @@ internal sealed class MonitorLayoutControl : Control
 
         e.Graphics.SmoothingMode =
             System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        UiThemePalette palette = SetupPalette.Current;
+        BackColor = palette.Input;
         foreach (MonitorDescriptor monitor in topology)
         {
             Rectangle rectangle = GetClientRectangle(monitor.Bounds);
             bool selected = remoteMonitorIds.Contains(monitor.MstscId);
-            using (Brush fill = new SolidBrush(selected
-                ? Color.FromArgb(218, 235, 255)
-                : Color.FromArgb(239, 241, 244)))
-            using (Pen border = new Pen(selected
-                ? Color.FromArgb(0, 103, 192)
-                : Color.FromArgb(115, 115, 115), selected ? 3f : 2f))
+            Color fillColor = selected
+                ? palette.Selection
+                : palette.Raised;
+            Color borderColor = selected
+                ? palette.Accent
+                : palette.Border;
+            using (Brush fill = new SolidBrush(fillColor))
+            using (Pen border = new Pen(borderColor, selected ? 3f : 2f))
             {
                 e.Graphics.FillRectangle(fill, rectangle);
                 e.Graphics.DrawRectangle(border, rectangle);
@@ -391,7 +441,7 @@ internal sealed class MonitorLayoutControl : Control
                 FontStyle.Bold, GraphicsUnit.Pixel))
             {
                 TextRenderer.DrawText(e.Graphics, number, numberFont, rectangle,
-                    selected ? Color.FromArgb(0, 72, 132) : Color.DimGray,
+                    selected ? palette.SelectionText : palette.MutedInk,
                     TextFormatFlags.HorizontalCenter |
                     TextFormatFlags.VerticalCenter |
                     TextFormatFlags.NoPadding);
@@ -404,7 +454,7 @@ internal sealed class MonitorLayoutControl : Control
             Rectangle detailsArea = new Rectangle(rectangle.Left + 5,
                 rectangle.Bottom - 24, rectangle.Width - 10, 19);
             TextRenderer.DrawText(e.Graphics, details, Font, detailsArea,
-                Color.FromArgb(55, 55, 55),
+                selected ? palette.SelectionText : palette.MutedInk,
                 TextFormatFlags.HorizontalCenter |
                 TextFormatFlags.EndEllipsis |
                 TextFormatFlags.NoPadding);
@@ -574,16 +624,16 @@ internal sealed class MonitorSelectionDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
         MaximizeBox = false;
-        FormBorderStyle = FormBorderStyle.Sizable;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
         ClientSize = new Size(720, 570);
-        MinimumSize = new Size(620, 500);
 
         Label instructions = new Label();
         instructions.AutoSize = false;
         instructions.Location = new Point(16, 14);
         instructions.Size = new Size(680, 40);
-        instructions.Text = "Select the monitor numbers used by the remote session. " +
-            "The reminder monitor is a separate choice.";
+        instructions.Text = "Select the numbered displays used by the remote " +
+            "session. The reminder display is a separate choice. RDP IDs follow " +
+            "Windows' native monitor order.";
 
         layout = new MonitorLayoutControl();
         layout.Location = new Point(16, 58);
@@ -632,6 +682,20 @@ internal sealed class MonitorSelectionDialog : Form
             previewSession = new MonitorNumberPreviewSession(monitors, 1800);
         };
 
+        Button verifyIdsButton = new Button();
+        verifyIdsButton.Location = new Point(530, 394);
+        verifyIdsButton.Size = new Size(166, 29);
+        verifyIdsButton.Text = "Show official RDP IDs";
+        verifyIdsButton.Click += delegate
+        {
+            ProcessStartInfo start = new ProcessStartInfo();
+            start.FileName = Path.Combine(Environment.SystemDirectory,
+                "mstsc.exe");
+            start.Arguments = "/l";
+            start.UseShellExecute = true;
+            Process.Start(start);
+        };
+
         warningLabel = new Label();
         warningLabel.AutoSize = false;
         warningLabel.Location = new Point(16, 452);
@@ -661,6 +725,7 @@ internal sealed class MonitorSelectionDialog : Form
         Controls.Add(reminderLabel);
         Controls.Add(reminderList);
         Controls.Add(identifyButton);
+        Controls.Add(verifyIdsButton);
         Controls.Add(warningLabel);
         Controls.Add(okButton);
         Controls.Add(cancelButton);
@@ -695,6 +760,7 @@ internal sealed class MonitorSelectionDialog : Form
             selection = new MonitorSelection(monitors, all, reminder);
         }
         ApplySelection(selection);
+        SetupVisualTheme.Apply(this);
     }
 
     protected override void Dispose(bool disposing)
@@ -839,7 +905,10 @@ internal sealed class RdpResourceOptions
             "redirectcomports:i:" + BoolValue(RedirectComPorts),
             "redirectsmartcards:i:" + BoolValue(RedirectSmartCards),
             "redirectwebauthn:i:" + BoolValue(RedirectWebAuthn),
-            "redirectlocation:i:" + BoolValue(RedirectLocation)
+            "redirectlocation:i:" + BoolValue(RedirectLocation),
+            "devicestoredirect:s:",
+            "camerastoredirect:s:",
+            "usbdevicestoredirect:s:"
         };
     }
 
@@ -863,6 +932,113 @@ internal sealed class RdpResourceOptions
     }
 }
 
+internal sealed class RdpResourcePreview
+{
+    public bool? RedirectClipboard;
+    public bool? RedirectDrives;
+    public bool? RedirectPrinters;
+    public bool? RedirectMicrophone;
+    public bool? RedirectComPorts;
+    public bool? RedirectSmartCards;
+    public bool? RedirectWebAuthn;
+    public bool? RedirectLocation;
+    public bool? RedirectMtpPtpDevices;
+    public bool? RedirectCameras;
+    public bool? RedirectUsbDevices;
+}
+
+internal sealed class RdpImportSnapshot : IDisposable
+{
+    private const long MaximumBytes = 4L * 1024L * 1024L;
+    private bool ownsFile = true;
+
+    public string SnapshotPath { get; private set; }
+    public string SourceFileName { get; private set; }
+
+    private RdpImportSnapshot(string snapshotPath, string sourceFileName)
+    {
+        SnapshotPath = snapshotPath;
+        SourceFileName = sourceFileName;
+    }
+
+    public static RdpImportSnapshot Create(string sourcePath)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath))
+            throw new ArgumentException("Choose an RDP file.", "sourcePath");
+        string fullPath = Path.GetFullPath(sourcePath);
+        if (!string.Equals(Path.GetExtension(fullPath), ".rdp",
+                StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Choose a file ending in .rdp.");
+
+        string snapshotPath = Path.Combine(Path.GetTempPath(),
+            "RdpSessionReminder-import-" + Guid.NewGuid().ToString("N") +
+            ".rdp");
+        try
+        {
+            using (FileStream source = new FileStream(fullPath, FileMode.Open,
+                FileAccess.Read, FileShare.Read, 81920,
+                FileOptions.SequentialScan))
+            {
+                if (source.Length > MaximumBytes)
+                    throw new InvalidDataException(
+                        "The RDP file is larger than the 4 MB safety limit.");
+                using (FileStream destination = new FileStream(snapshotPath,
+                    FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    81920, FileOptions.SequentialScan))
+                {
+                    byte[] buffer = new byte[81920];
+                    long total = 0;
+                    int count;
+                    while ((count = source.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        total += count;
+                        if (total > MaximumBytes)
+                            throw new InvalidDataException(
+                                "The RDP file changed or exceeded the 4 MB safety limit.");
+                        destination.Write(buffer, 0, count);
+                    }
+                    destination.Flush(true);
+                }
+            }
+            return new RdpImportSnapshot(snapshotPath,
+                Path.GetFileName(fullPath));
+        }
+        catch
+        {
+            try
+            {
+                if (File.Exists(snapshotPath))
+                    File.Delete(snapshotPath);
+            }
+            catch
+            {
+            }
+            throw;
+        }
+    }
+
+    public string Detach()
+    {
+        ownsFile = false;
+        return SnapshotPath;
+    }
+
+    public void Dispose()
+    {
+        if (!ownsFile || string.IsNullOrEmpty(SnapshotPath))
+            return;
+        ownsFile = false;
+        try
+        {
+            if (File.Exists(SnapshotPath))
+                File.Delete(SnapshotPath);
+        }
+        catch
+        {
+        }
+    }
+}
+
 internal sealed class RdpImportPreview
 {
     public string SourceFileName { get; private set; }
@@ -875,7 +1051,7 @@ internal sealed class RdpImportPreview
     public bool Password51Present { get; private set; }
     public bool GatewayPresent { get; private set; }
     public string GatewayDisplay { get; private set; }
-    public RdpResourceOptions Resources { get; private set; }
+    public RdpResourcePreview Resources { get; private set; }
     public int? ScreenModeId { get; private set; }
     public int? DesktopWidth { get; private set; }
     public int? DesktopHeight { get; private set; }
@@ -898,28 +1074,30 @@ internal sealed class RdpImportPreview
 
     public static RdpImportPreview Read(string path, bool revealEndpoints)
     {
+        return Read(path, Path.GetFileName(path), revealEndpoints);
+    }
+
+    internal static RdpImportPreview Read(string path, string displayFileName,
+        bool revealEndpoints)
+    {
         if (string.IsNullOrWhiteSpace(path))
             throw new ArgumentException("Choose an RDP file to preview.", "path");
 
         string fullPath = Path.GetFullPath(path);
-        FileInfo source = new FileInfo(fullPath);
-        if (!source.Exists)
-            throw new FileNotFoundException("The RDP file was not found.", fullPath);
-        if (source.Length > 4 * 1024 * 1024)
-            throw new InvalidDataException(
-                "The RDP file is too large to preview safely.");
-
         Dictionary<string, RdpSettingRecord> settings =
             new Dictionary<string, RdpSettingRecord>(
                 StringComparer.OrdinalIgnoreCase);
 
-        // StreamReader detects UTF-8/UTF-16 BOMs used by RDP files. FileShare
-        // prevents the preview from changing or locking the source file.
+        // Open first, deny writers/deletion, and then validate the exact handle
+        // being parsed. StreamReader detects UTF-8/UTF-16 BOMs used by RDP files.
         using (FileStream stream = new FileStream(fullPath, FileMode.Open,
-            FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            FileAccess.Read, FileShare.Read))
         using (StreamReader reader = new StreamReader(stream, Encoding.Default,
             true))
         {
+            if (stream.Length > 4 * 1024 * 1024)
+                throw new InvalidDataException(
+                    "The RDP file is too large to preview safely.");
             string line;
             while ((line = reader.ReadLine()) != null)
             {
@@ -938,7 +1116,9 @@ internal sealed class RdpImportPreview
         }
 
         RdpImportPreview preview = new RdpImportPreview();
-        preview.SourceFileName = source.Name;
+        preview.SourceFileName = string.IsNullOrWhiteSpace(displayFileName)
+            ? Path.GetFileName(fullPath)
+            : Path.GetFileName(displayFileName);
         preview.EndpointsRevealed = revealEndpoints;
 
         string fullAddress = GetString(settings, "full address");
@@ -956,17 +1136,25 @@ internal sealed class RdpImportPreview
         preview.UsernamePresent = HasNonEmptyValue(settings, "username");
         preview.Password51Present = settings.ContainsKey("password 51");
 
-        RdpResourceOptions resources = new RdpResourceOptions();
-        resources.RedirectClipboard = GetEnabled(settings, "redirectclipboard");
-        resources.RedirectDrives =
-            HasNonEmptyValue(settings, "drivestoredirect") ||
-            GetEnabled(settings, "redirectdrives");
-        resources.RedirectPrinters = GetEnabled(settings, "redirectprinters");
-        resources.RedirectMicrophone = GetEnabled(settings, "audiocapturemode");
-        resources.RedirectComPorts = GetEnabled(settings, "redirectcomports");
-        resources.RedirectSmartCards = GetEnabled(settings, "redirectsmartcards");
-        resources.RedirectWebAuthn = GetEnabled(settings, "redirectwebauthn");
-        resources.RedirectLocation = GetEnabled(settings, "redirectlocation");
+        RdpResourcePreview resources = new RdpResourcePreview();
+        resources.RedirectClipboard = GetBoolean(settings, "redirectclipboard");
+        resources.RedirectDrives = GetStringEnabled(settings,
+            "drivestoredirect");
+        if (!resources.RedirectDrives.HasValue)
+            resources.RedirectDrives = GetBoolean(settings, "redirectdrives");
+        resources.RedirectPrinters = GetBoolean(settings, "redirectprinters");
+        resources.RedirectMicrophone = GetBoolean(settings, "audiocapturemode");
+        resources.RedirectComPorts = GetBoolean(settings, "redirectcomports");
+        resources.RedirectSmartCards = GetBoolean(settings,
+            "redirectsmartcards");
+        resources.RedirectWebAuthn = GetBoolean(settings, "redirectwebauthn");
+        resources.RedirectLocation = GetBoolean(settings, "redirectlocation");
+        resources.RedirectMtpPtpDevices = GetStringEnabled(settings,
+            "devicestoredirect");
+        resources.RedirectCameras = GetStringEnabled(settings,
+            "camerastoredirect");
+        resources.RedirectUsbDevices = GetStringEnabled(settings,
+            "usbdevicestoredirect");
         preview.Resources = resources;
 
         preview.ScreenModeId = GetInteger(settings, "screen mode id");
@@ -988,6 +1176,15 @@ internal sealed class RdpImportPreview
                 "is never displayed or retained by this preview.");
         }
 
+        AddDefaultEnabledResourceWarning(warnings,
+            resources.RedirectComPorts, "COM ports");
+        AddDefaultEnabledResourceWarning(warnings,
+            resources.RedirectSmartCards, "Smart cards");
+        AddDefaultEnabledResourceWarning(warnings,
+            resources.RedirectWebAuthn, "WebAuthn");
+        AddDefaultEnabledResourceWarning(warnings,
+            resources.RedirectMtpPtpDevices, "MTP/PTP devices");
+
         if (!preview.AuthenticationLevel.HasValue)
         {
             preview.ServerAuthenticationSummary =
@@ -1004,12 +1201,12 @@ internal sealed class RdpImportPreview
         else if (preview.AuthenticationLevel.Value == 1)
         {
             preview.ServerAuthenticationSummary =
-                "Warn if server authentication fails.";
+                "Do not connect if server authentication fails.";
         }
         else if (preview.AuthenticationLevel.Value == 2)
         {
             preview.ServerAuthenticationSummary =
-                "Do not connect if server authentication fails.";
+                "Warn if server authentication fails and let the user decide.";
         }
         else
         {
@@ -1054,16 +1251,21 @@ internal sealed class RdpImportPreview
             NullableYesNo(DisplayConnectionBar));
         lines.Add("");
         lines.Add("Requested local resources");
-        AddResourceLine(lines, "Clipboard", Resources.RedirectClipboard);
-        AddResourceLine(lines, "Drives", Resources.RedirectDrives);
-        AddResourceLine(lines, "Printers", Resources.RedirectPrinters);
-        AddResourceLine(lines, "Microphone", Resources.RedirectMicrophone);
-        AddResourceLine(lines, "Ports", Resources.RedirectComPorts);
+        AddResourceLine(lines, "Clipboard", Resources.RedirectClipboard, false);
+        AddResourceLine(lines, "Drives", Resources.RedirectDrives, false);
+        AddResourceLine(lines, "Printers", Resources.RedirectPrinters, false);
+        AddResourceLine(lines, "Microphone", Resources.RedirectMicrophone, false);
+        AddResourceLine(lines, "Ports", Resources.RedirectComPorts, true);
         AddResourceLine(lines, "Smart cards / Windows Hello for Business",
-            Resources.RedirectSmartCards);
+            Resources.RedirectSmartCards, true);
         AddResourceLine(lines, "WebAuthn passkeys and security keys",
-            Resources.RedirectWebAuthn);
-        AddResourceLine(lines, "Location", Resources.RedirectLocation);
+            Resources.RedirectWebAuthn, true);
+        AddResourceLine(lines, "Location", Resources.RedirectLocation, false);
+        AddResourceLine(lines, "MTP/PTP devices",
+            Resources.RedirectMtpPtpDevices, true);
+        AddResourceLine(lines, "Cameras", Resources.RedirectCameras, false);
+        AddResourceLine(lines, "USB devices", Resources.RedirectUsbDevices,
+            false);
         lines.Add("");
         lines.Add("Server authentication: " + ServerAuthenticationSummary);
         foreach (string warning in AuthenticationWarnings)
@@ -1117,6 +1319,15 @@ internal sealed class RdpImportPreview
     {
         bool? value = GetBoolean(settings, name);
         return value.HasValue && value.Value;
+    }
+
+    private static bool? GetStringEnabled(
+        IDictionary<string, RdpSettingRecord> settings, string name)
+    {
+        RdpSettingRecord record;
+        if (!settings.TryGetValue(name, out record))
+            return null;
+        return !string.IsNullOrWhiteSpace(record.Value);
     }
 
     private static bool? GetBoolean(
@@ -1178,9 +1389,21 @@ internal sealed class RdpImportPreview
     }
 
     private static void AddResourceLine(ICollection<string> lines,
-        string name, bool enabled)
+        string name, bool? enabled, bool enabledByDefault)
     {
-        lines.Add("  " + name + ": " + YesNo(enabled));
+        string value = enabled.HasValue
+            ? YesNo(enabled.Value)
+            : "Not specified (Windows default is " +
+                (enabledByDefault ? "enabled" : "disabled") + ")";
+        lines.Add("  " + name + ": " + value);
+    }
+
+    private static void AddDefaultEnabledResourceWarning(
+        ICollection<string> warnings, bool? value, string resourceName)
+    {
+        if (!value.HasValue)
+            warnings.Add(resourceName + " are not specified; Windows' default " +
+                "can enable this redirection.");
     }
 
     private static string YesNo(bool value)
@@ -1211,12 +1434,20 @@ internal sealed class RdpImportPreview
 internal sealed class RdpImportPreviewDialog : Form
 {
     private readonly string sourcePath;
+    private readonly string sourceFileName;
     private readonly RichTextBox previewText;
     private readonly CheckBox revealEndpoints;
 
     public RdpImportPreviewDialog(string path)
+        : this(path, Path.GetFileName(path), false)
+    {
+    }
+
+    public RdpImportPreviewDialog(string path, string displayFileName,
+        bool confirmUse)
     {
         sourcePath = Path.GetFullPath(path);
+        sourceFileName = Path.GetFileName(displayFileName);
         Text = "RDP import preview";
         StartPosition = FormStartPosition.CenterParent;
         ClientSize = new Size(650, 610);
@@ -1230,9 +1461,11 @@ internal sealed class RdpImportPreviewDialog : Form
         explanation.Size = new Size(620, 44);
         explanation.Anchor = AnchorStyles.Top | AnchorStyles.Left |
             AnchorStyles.Right;
-        explanation.Text = "This read-only preview shows what the RDP file " +
-            "requests. It does not change the file, and it never displays a " +
-            "saved password value.";
+        explanation.Text = confirmUse
+            ? "Review this locked snapshot before importing it. Endpoints stay " +
+                "hidden unless you reveal them; saved password values are never shown."
+            : "This read-only preview shows what the RDP file requests. It does " +
+                "not change the file, and it never displays a saved password value.";
 
         revealEndpoints = new CheckBox();
         revealEndpoints.AutoSize = true;
@@ -1254,22 +1487,39 @@ internal sealed class RdpImportPreviewDialog : Form
         closeButton.Location = new Point(546, 566);
         closeButton.Size = new Size(90, 30);
         closeButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
-        closeButton.Text = "Close";
+        closeButton.Text = confirmUse ? "Use this file" : "Close";
         closeButton.DialogResult = DialogResult.OK;
 
         Controls.Add(explanation);
         Controls.Add(revealEndpoints);
         Controls.Add(previewText);
         Controls.Add(closeButton);
+        if (confirmUse)
+        {
+            closeButton.Location = new Point(432, 566);
+            closeButton.Size = new Size(110, 30);
+            Button cancelButton = new Button();
+            cancelButton.Location = new Point(546, 566);
+            cancelButton.Size = new Size(90, 30);
+            cancelButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            cancelButton.Text = "Cancel";
+            cancelButton.DialogResult = DialogResult.Cancel;
+            Controls.Add(cancelButton);
+            CancelButton = cancelButton;
+        }
+        else
+        {
+            CancelButton = closeButton;
+        }
         AcceptButton = closeButton;
-        CancelButton = closeButton;
         RefreshPreview();
+        SetupVisualTheme.Apply(this);
     }
 
     private void RefreshPreview()
     {
         RdpImportPreview preview = RdpImportPreview.Read(sourcePath,
-            revealEndpoints.Checked);
+            sourceFileName, revealEndpoints.Checked);
         previewText.Lines = preview.GetDisplayLines();
         previewText.SelectionStart = 0;
         previewText.SelectionLength = 0;
@@ -1372,13 +1622,13 @@ internal static class ShortcutIconCatalog
             return false;
         try
         {
-            string root = Path.GetFullPath(AppPaths.InstallDirectory)
-                .TrimEnd(Path.DirectorySeparatorChar,
-                    Path.AltDirectorySeparatorChar) +
-                Path.DirectorySeparatorChar;
+            string root = Path.GetFullPath(Path.Combine(
+                AppPaths.InstallDirectory, IconDirectoryName));
             string fullPath = Path.GetFullPath(path);
-            return fullPath.StartsWith(root,
-                StringComparison.OrdinalIgnoreCase);
+            return string.Equals(Path.GetDirectoryName(fullPath), root,
+                StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(Path.GetExtension(fullPath), ".ico",
+                    StringComparison.OrdinalIgnoreCase);
         }
         catch
         {
@@ -1404,12 +1654,24 @@ internal static class ShortcutIconCatalog
         if (!IsAppOwnedIconPath(choice.IconPath))
             throw new InvalidOperationException(
                 "Refusing to write an icon outside the application folder.");
+        string installDirectory = Path.GetFullPath(AppPaths.InstallDirectory);
+        string directory = Path.GetDirectoryName(choice.IconPath);
+        if (Directory.Exists(installDirectory) &&
+            IsReparsePoint(installDirectory))
+            throw new IOException(
+                "The application folder is a reparse point; no icon was written.");
+        Directory.CreateDirectory(directory);
+        if (IsReparsePoint(directory))
+            throw new IOException(
+                "The application icon folder is a reparse point; no icon was written.");
+        if (Directory.Exists(choice.IconPath) ||
+            (File.Exists(choice.IconPath) && IsReparsePoint(choice.IconPath)))
+            throw new IOException(
+                "The generated icon destination is not a regular file.");
         if (File.Exists(choice.IconPath) &&
             new FileInfo(choice.IconPath).Length > 128)
             return;
 
-        string directory = Path.GetDirectoryName(choice.IconPath);
-        Directory.CreateDirectory(directory);
         string temporaryPath = Path.Combine(directory,
             ".icon-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
@@ -1424,6 +1686,11 @@ internal static class ShortcutIconCatalog
             if (File.Exists(temporaryPath))
                 File.Delete(temporaryPath);
         }
+    }
+
+    private static bool IsReparsePoint(string path)
+    {
+        return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
     }
 
     private static void WriteIcon(string path, ShortcutIconKind kind)

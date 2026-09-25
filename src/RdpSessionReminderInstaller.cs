@@ -12,8 +12,8 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("RDP Session Reminder contributors")]
 [assembly: AssemblyProduct("RDP Session Reminder")]
 [assembly: AssemblyCopyright("Copyright (c) 2026")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 internal static class InstallerProgram
 {
@@ -72,6 +72,8 @@ internal static class InstallerProgram
                 ProcessStartInfo startInfo = new ProcessStartInfo();
                 startInfo.FileName = layout.SetupPath;
                 startInfo.UseShellExecute = true;
+                InstallerEngine.EnsureSafeDirectoryRoot(
+                    layout.InstallDirectory, "application folder", true);
                 Process.Start(startInfo);
             }
             return 0;
@@ -396,7 +398,7 @@ internal sealed class InstallerOptions
 internal static class ProductInfo
 {
     public const string ProductName = "RDP Session Reminder";
-    public const string Version = "1.1.0";
+    public const string Version = "1.2.0";
     public const string RuntimeFileName = "RdpSessionReminder.exe";
     public const string SetupFileName = "RdpSessionReminderSetup.exe";
     public const string InstallerFileName = "RdpSessionReminder-Installer.exe";
@@ -494,31 +496,64 @@ internal static class InstallerEngine
         if (layout == null)
             throw new ArgumentNullException("layout");
 
-        Directory.CreateDirectory(layout.InstallDirectory);
-        WriteExecutableResource(RuntimeResource, layout.RuntimePath);
-        WriteExecutableResource(SetupResource, layout.SetupPath);
-        WriteExecutableResource(UninstallerResource, layout.UninstallerPath);
+        EnsureSafeDirectoryRoot(
+            layout.InstallDirectory, "application folder", false);
+        EnsureSafeDirectoryRoot(
+            layout.StartMenuDirectory, "Start menu folder", false);
 
+        Directory.CreateDirectory(layout.InstallDirectory);
+        EnsureSafeDirectoryRoot(
+            layout.InstallDirectory, "application folder", true);
+        WriteExecutableResource(RuntimeResource, layout.RuntimePath,
+            layout.InstallDirectory);
+        WriteExecutableResource(SetupResource, layout.SetupPath,
+            layout.InstallDirectory);
+        WriteExecutableResource(UninstallerResource, layout.UninstallerPath,
+            layout.InstallDirectory);
+
+        EnsureSafeDirectoryRoot(
+            layout.StartMenuDirectory, "Start menu folder", false);
         Directory.CreateDirectory(layout.StartMenuDirectory);
+        EnsureSafeDirectoryRoot(
+            layout.StartMenuDirectory, "Start menu folder", true);
+        EnsureSafeDirectoryRoot(
+            layout.InstallDirectory, "application folder", true);
         InstallerShortcutWriter.Create(
             layout.SetupShortcutPath, layout.SetupPath,
             layout.InstallDirectory, "Create or update a Remote Desktop reminder shortcut");
+        EnsureSafeDirectoryRoot(
+            layout.StartMenuDirectory, "Start menu folder", true);
+        EnsureSafeDirectoryRoot(
+            layout.InstallDirectory, "application folder", true);
         InstallerShortcutWriter.Create(
             layout.UninstallShortcutPath, layout.UninstallerPath,
             layout.InstallDirectory, "Uninstall RDP Session Reminder");
 
         if (registerApplication)
+        {
+            EnsureSafeDirectoryRoot(
+                layout.InstallDirectory, "application folder", true);
             RegisterApplication(layout);
+        }
 
         // This exact file is an app-owned note created by the uninstaller.
         // A successful reinstall makes its uninstall message stale.
+        EnsureSafeDirectoryRoot(
+            layout.InstallDirectory, "application folder", true);
         if (File.Exists(layout.SavedConnectionsNotePath))
+        {
+            EnsureSafeDirectoryRoot(
+                layout.InstallDirectory, "application folder", true);
             File.Delete(layout.SavedConnectionsNotePath);
+        }
     }
 
     private static void WriteExecutableResource(string resourceName,
-        string destination)
+        string destination, string installDirectory)
     {
+        EnsureSafeDirectoryRoot(
+            installDirectory, "application folder", true);
+        EnsureSafeFileDestination(destination, "application file");
         string temporary = destination + ".installing-" +
             Guid.NewGuid().ToString("N");
         try
@@ -536,33 +571,116 @@ internal static class InstallerEngine
                         "The installer payload is not a Windows executable: " +
                         resourceName);
                 source.Position = 0;
+                EnsureSafeDirectoryRoot(
+                    installDirectory, "application folder", true);
                 using (FileStream output = new FileStream(temporary,
                     FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     source.CopyTo(output);
             }
 
+            EnsureSafeDirectoryRoot(
+                installDirectory, "application folder", true);
+            EnsureSafeFileDestination(destination, "application file");
             if (File.Exists(destination))
             {
                 try
                 {
+                    EnsureSafeDirectoryRoot(
+                        installDirectory, "application folder", true);
                     File.Replace(temporary, destination, null, true);
                 }
                 catch (PlatformNotSupportedException)
                 {
-                    File.Copy(temporary, destination, true);
-                    File.Delete(temporary);
+                    EnsureSafeDirectoryRoot(
+                        installDirectory, "application folder", true);
+                    EnsureSafeFileDestination(destination,
+                        "application file");
+                    File.Delete(destination);
+                    EnsureSafeDirectoryRoot(
+                        installDirectory, "application folder", true);
+                    File.Move(temporary, destination);
                 }
             }
             else
             {
+                EnsureSafeDirectoryRoot(
+                    installDirectory, "application folder", true);
                 File.Move(temporary, destination);
             }
         }
         finally
         {
             if (File.Exists(temporary))
+            {
+                EnsureSafeDirectoryRoot(
+                    installDirectory, "application folder", true);
                 File.Delete(temporary);
+            }
         }
+    }
+
+    internal static void EnsureSafeDirectoryRoot(string path,
+        string description, bool mustExist)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("A directory path is required.", "path");
+        string fullPath = Path.GetFullPath(path);
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(fullPath);
+        }
+        catch (FileNotFoundException)
+        {
+            if (mustExist)
+                throw new DirectoryNotFoundException(
+                    "The " + description + " no longer exists: " + fullPath);
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            if (mustExist)
+                throw new DirectoryNotFoundException(
+                    "The " + description + " no longer exists: " + fullPath);
+            return;
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException(
+                "The " + description +
+                " cannot be a reparse point or directory link: " + fullPath);
+        if ((attributes & FileAttributes.Directory) == 0)
+            throw new IOException(
+                "The " + description + " is not a directory: " + fullPath);
+    }
+
+    internal static void EnsureSafeFileDestination(string path,
+        string description)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("A file path is required.", "path");
+        string fullPath = Path.GetFullPath(path);
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(fullPath);
+        }
+        catch (FileNotFoundException)
+        {
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return;
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException(
+                "The " + description +
+                " cannot be a reparse point or file link: " + fullPath);
+        if ((attributes & FileAttributes.Directory) != 0)
+            throw new IOException(
+                "The " + description + " cannot be a directory: " + fullPath);
     }
 
     private static void RegisterApplication(InstallLayout layout)
@@ -631,6 +749,11 @@ internal static class InstallerEngine
             File.WriteAllBytes(settingsPath, settingsBytes);
             File.WriteAllBytes(rdpPath, rdpBytes);
             File.WriteAllBytes(desktopShortcut, shortcutBytes);
+            string uiSettingsPath = Path.Combine(
+                installDirectory, "ui-settings.ini");
+            byte[] uiSettingsBytes = System.Text.Encoding.UTF8.GetBytes(
+                "Theme=Light\n");
+            File.WriteAllBytes(uiSettingsPath, uiSettingsBytes);
 
             InstallLayout layout = new InstallLayout(
                 installDirectory, startMenuDirectory);
@@ -645,9 +768,11 @@ internal static class InstallerEngine
                 !File.Exists(layout.UninstallShortcutPath) ||
                 !BytesEqual(settingsBytes, File.ReadAllBytes(settingsPath)) ||
                 !BytesEqual(rdpBytes, File.ReadAllBytes(rdpPath)) ||
-                !BytesEqual(shortcutBytes,
-                    File.ReadAllBytes(desktopShortcut)) ||
-                File.Exists(layout.SavedConnectionsNotePath))
+                 !BytesEqual(shortcutBytes,
+                     File.ReadAllBytes(desktopShortcut)) ||
+                 !BytesEqual(uiSettingsBytes,
+                     File.ReadAllBytes(uiSettingsPath)) ||
+                 File.Exists(layout.SavedConnectionsNotePath))
                 return 40;
             return 0;
         }
@@ -689,6 +814,14 @@ internal static class InstallerShortcutWriter
     public static void Create(string path, string target, string workingDirectory,
         string description)
     {
+        string shortcutDirectory = Path.GetDirectoryName(
+            Path.GetFullPath(path));
+        InstallerEngine.EnsureSafeDirectoryRoot(
+            shortcutDirectory, "Start menu folder", true);
+        InstallerEngine.EnsureSafeFileDestination(path,
+            "Start menu shortcut");
+        string temporary = path + ".new-" + Guid.NewGuid().ToString("N") +
+            ".lnk";
         object shell = null;
         object shortcut = null;
         try
@@ -700,7 +833,8 @@ internal static class InstallerShortcutWriter
                     "could not be created.");
             shell = Activator.CreateInstance(shellType);
             shortcut = shellType.InvokeMember("CreateShortcut",
-                BindingFlags.InvokeMethod, null, shell, new object[] { path });
+                BindingFlags.InvokeMethod, null, shell,
+                new object[] { temporary });
             Type shortcutType = shortcut.GetType();
             shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty,
                 null, shortcut, new object[] { target });
@@ -712,11 +846,38 @@ internal static class InstallerShortcutWriter
                 null, shortcut, new object[] { target + ",0" });
             shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod,
                 null, shortcut, null);
+
+            InstallerEngine.EnsureSafeDirectoryRoot(
+                shortcutDirectory, "Start menu folder", true);
+            InstallerEngine.EnsureSafeFileDestination(path,
+                "Start menu shortcut");
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Replace(temporary, path, null, true);
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    InstallerEngine.EnsureSafeFileDestination(path,
+                        "Start menu shortcut");
+                    File.Delete(path);
+                    InstallerEngine.EnsureSafeDirectoryRoot(
+                        shortcutDirectory, "Start menu folder", true);
+                    File.Move(temporary, path);
+                }
+            }
+            else
+            {
+                File.Move(temporary, path);
+            }
         }
         finally
         {
             ReleaseComObject(shortcut);
             ReleaseComObject(shell);
+            if (File.Exists(temporary))
+                File.Delete(temporary);
         }
     }
 

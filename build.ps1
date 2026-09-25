@@ -36,6 +36,12 @@ $runtimeSource = Join-Path $sourceDirectory 'RdpSessionReminder.cs'
 $setupSource = Join-Path $sourceDirectory 'RdpSessionReminderSetup.cs'
 $updateSupportSource = Join-Path $sourceDirectory 'UpdateSupport.cs'
 $updateUiSource = Join-Path $sourceDirectory 'UpdateUi.cs'
+$advancedSetupSource = Join-Path $sourceDirectory 'AdvancedSetupSupport.cs'
+$bannerSetupSource = Join-Path $sourceDirectory 'BannerSetupUi.cs'
+$connectionManagerSource = Join-Path $sourceDirectory 'ConnectionManagerUi.cs'
+$profileEditorSource = Join-Path $sourceDirectory 'ManagedProfileEditorForm.cs'
+$signatureStatusSource = Join-Path $sourceDirectory 'ExecutableSignatureStatus.cs'
+$setupVisualsSource = Join-Path $sourceDirectory 'SetupVisuals.cs'
 $installerSource = Join-Path $sourceDirectory 'RdpSessionReminderInstaller.cs'
 $uninstallerSource = Join-Path $sourceDirectory 'RdpSessionReminderUninstaller.cs'
 $iconPath = Join-Path $assetDirectory 'RdpSessionReminder.ico'
@@ -81,7 +87,9 @@ Invoke-OptionalSigning -Path $runtimeOutput
     /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll `
     /win32icon:$iconPath /win32manifest:$manifestPath `
-    /out:$setupOutput $commonSource $updateSupportSource $updateUiSource $setupSource
+    /out:$setupOutput $commonSource $updateSupportSource $updateUiSource `
+    $advancedSetupSource $bannerSetupSource $connectionManagerSource `
+    $profileEditorSource $signatureStatusSource $setupVisualsSource $setupSource
 if ($LASTEXITCODE -ne 0) {
     throw 'The setup application failed to compile.'
 }
@@ -113,7 +121,12 @@ if ($LASTEXITCODE -ne 0) {
 Invoke-OptionalSigning -Path $installerOutput
 
 & (Join-Path $repoRoot 'tests\SmokeTests.ps1') -DistDirectory $distDirectory
+& (Join-Path $repoRoot 'tests\RuntimeCustomizationChecks.ps1') `
+    -DistDirectory $distDirectory
+& (Join-Path $repoRoot 'tests\AdvancedSetupChecks.ps1') -RepoRoot $repoRoot
+& (Join-Path $repoRoot 'tests\ConnectionManagerChecks.ps1') -RepoRoot $repoRoot
 & (Join-Path $repoRoot 'tests\ReflectionChecks.ps1') -DistDirectory $distDirectory
+& (Join-Path $repoRoot 'tests\ThemeChecks.ps1') -DistDirectory $distDirectory
 & (Join-Path $repoRoot 'tests\UpdaterChecks.ps1') -DistDirectory $distDirectory
 & (Join-Path $repoRoot 'tests\InstallerChecks.ps1') `
     -RepoRoot $repoRoot -DistDirectory $distDirectory

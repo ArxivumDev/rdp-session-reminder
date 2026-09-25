@@ -12,8 +12,8 @@ using System.Threading;
 [assembly: AssemblyCompany("RDP Session Reminder contributors")]
 [assembly: AssemblyProduct("RDP Session Reminder")]
 [assembly: AssemblyCopyright("Copyright (c) 2026")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 internal static class RdpSessionReminder
 {
@@ -439,6 +439,7 @@ internal static class RdpSessionReminder
         }
 
         bool oneTime = oneTimeIndex >= 0;
+        bool promptCredentials = HasArgument(args, "--prompt-credentials");
         int selectedIndex = oneTime ? oneTimeIndex : profileIndex;
         if (selectedIndex + 1 >= args.Length ||
             !SettingsStore.IsValidProfileId(args[selectedIndex + 1]))
@@ -510,7 +511,7 @@ internal static class RdpSessionReminder
 
         try
         {
-            return RunReminder(settings);
+            return RunReminder(settings, promptCredentials);
         }
         finally
         {
@@ -535,7 +536,8 @@ internal static class RdpSessionReminder
         }
     }
 
-    private static int RunReminder(ReminderSettings settings)
+    private static int RunReminder(ReminderSettings settings,
+        bool promptCredentials)
     {
         try
         {
@@ -590,11 +592,13 @@ internal static class RdpSessionReminder
                         "missing. Run setup to create a new shortcut.");
                     return 1;
                 }
-                launchArguments = QuoteCommandLineArgument(settings.RdpFile);
+                launchArguments = QuoteCommandLineArgument(settings.RdpFile) +
+                    (promptCredentials ? " /prompt" : "");
             }
             else
             {
-                launchArguments = BuildDirectArguments(settings);
+                launchArguments = BuildDirectArguments(settings,
+                    promptCredentials);
             }
 
             string launchError;
@@ -665,11 +669,18 @@ internal static class RdpSessionReminder
 
     private static string BuildDirectArguments(ReminderSettings settings)
     {
+        return BuildDirectArguments(settings, false);
+    }
+
+    private static string BuildDirectArguments(ReminderSettings settings,
+        bool promptCredentials)
+    {
         if (settings == null ||
             !SettingsStore.IsValidComputerName(settings.ComputerName))
             throw new ArgumentException("A valid Remote Desktop target is required.");
         return "/v:" + SettingsStore.NormalizeComputerName(settings.ComputerName) +
-            (settings.FullScreen ? " /f" : "");
+            (settings.FullScreen ? " /f" : "") +
+            (promptCredentials ? " /prompt" : "");
     }
 
     private static void RefreshTargetFromRdpFile(ReminderSettings settings)
@@ -1529,6 +1540,15 @@ internal static class RdpSessionReminder
             if (!SettingsStore.IsValidProfileId(profileId) ||
                 SettingsStore.IsValidProfileId("../profile"))
                 return 14;
+
+            ReminderSettings launchSettings = new ReminderSettings();
+            launchSettings.ComputerName = "workstation-01";
+            launchSettings.FullScreen = true;
+            if (BuildDirectArguments(launchSettings) !=
+                    "/v:workstation-01 /f" ||
+                BuildDirectArguments(launchSettings, true) !=
+                    "/v:workstation-01 /f /prompt")
+                return 29;
 
             string directory = Path.Combine(Path.GetTempPath(),
                 "RdpSessionReminder-" + Guid.NewGuid().ToString("N"));

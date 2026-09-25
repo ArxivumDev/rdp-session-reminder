@@ -12,8 +12,8 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("RDP Session Reminder contributors")]
 [assembly: AssemblyProduct("RDP Session Reminder")]
 [assembly: AssemblyCopyright("Copyright (c) 2026")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 internal static class UninstallerProgram
 {
@@ -26,6 +26,20 @@ internal static class UninstallerProgram
         UninstallLayout layout = UninstallLayout.CreateForCurrentUser();
         string currentPath = Path.GetFullPath(Application.ExecutablePath);
         bool temporaryCopy = HasArgument(args, "--temporary-uninstaller");
+
+        try
+        {
+            UninstallerEngine.ValidateUninstallRoots(layout);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                "The uninstaller could not start safely.\r\n\r\n" +
+                exception.Message,
+                UninstallProductInfo.ProductName, MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return 1;
+        }
 
         if (!temporaryCopy && PathsEqual(currentPath, layout.UninstallerPath))
         {
@@ -86,7 +100,8 @@ internal static class UninstallerProgram
             DialogResult confirmation = MessageBox.Show(
                 "Remove app-managed saved connections too?\r\n\r\n" +
                 "This deletes connection.rdp and settings.ini copies under the " +
-                "app profiles folder and verified reminder shortcuts currently " +
+                "app profiles folder, app-generated shortcut icons, abandoned " +
+                "one-time profiles, and verified reminder shortcuts currently " +
                 "in the Desktop folder.\r\n\r\n" +
                 "Original imported .rdp files and unrelated shortcuts are not " +
                 "deleted. Copies moved outside the Desktop folder are not searched " +
@@ -103,13 +118,16 @@ internal static class UninstallerProgram
                 layout, true, removeSavedConnections);
             string message = removeSavedConnections
                 ? "RDP Session Reminder and its app-managed saved connection " +
-                    "copies were removed.\r\n\r\nOriginal imported .rdp files " +
+                    "copies, generated icons, and abandoned one-time profiles " +
+                    "were removed.\r\n\r\nOriginal imported .rdp files " +
                     "were never touched. Verified reminder shortcuts currently " +
                     "in the Desktop folder were removed. Copies moved outside " +
                     "the Desktop folder were not searched for and may remain."
                 : "RDP Session Reminder was uninstalled.\r\n\r\n" +
                     "Your generated and imported profile copies remain in:\r\n" +
                     layout.ProfilesDirectory + "\r\n\r\n" +
+                    "Generated shortcut icons and any abandoned one-time " +
+                    "profiles also remain under the application folder.\r\n\r\n" +
                     "Original imported .rdp files were never touched. Desktop, " +
                     "moved, and copied reminder shortcuts remain too. Those " +
                     "shortcuts need the app to be reinstalled before they work " +
@@ -266,7 +284,7 @@ internal sealed class UninstallOptionsForm : Form
         explanation.Width = 540;
         explanation.Height = 230;
         explanation.Text =
-            "Uninstall the app binaries, Start menu entries, update settings, " +
+            "Uninstall the app binaries, Start menu entries, setup preferences, " +
             "and app-owned publisher trust.\r\n\r\n" +
             "The app takes extra care to remove and verify only the exact app-owned " +
             "certificate, its private key, and its SHA-256 trust entry. Unrelated " +
@@ -283,16 +301,17 @@ internal sealed class UninstallOptionsForm : Form
         removeSavedConnectionsCheck.Left = 20;
         removeSavedConnectionsCheck.Top = 260;
         removeSavedConnectionsCheck.Width = 540;
-        removeSavedConnectionsCheck.Height = 42;
+        removeSavedConnectionsCheck.Height = 54;
         removeSavedConnectionsCheck.Text =
-            "Also remove my app-managed saved connection copies and verified " +
-            "reminder shortcuts currently in the Desktop folder";
+            "Also remove my app-managed saved connections, generated icons, " +
+            "abandoned one-time profiles, and verified reminder shortcuts " +
+            "currently in the Desktop folder";
         removeSavedConnectionsCheck.Checked = false;
         Controls.Add(removeSavedConnectionsCheck);
 
         Label scope = new Label();
         scope.Left = 40;
-        scope.Top = 305;
+        scope.Top = 318;
         scope.Width = 520;
         scope.Height = 36;
         scope.Text =
@@ -393,6 +412,16 @@ internal sealed class UninstallLayout
         get { return Path.Combine(InstallDirectory, "profiles"); }
     }
 
+    public string OneTimeProfilesDirectory
+    {
+        get { return Path.Combine(InstallDirectory, "one-time"); }
+    }
+
+    public string IconsDirectory
+    {
+        get { return Path.Combine(InstallDirectory, "icons"); }
+    }
+
     public string DesktopDirectory
     {
         get { return desktopDirectory; }
@@ -433,6 +462,11 @@ internal sealed class UninstallLayout
     public string UpdateSettingsPath
     {
         get { return Path.Combine(InstallDirectory, "update-settings.ini"); }
+    }
+
+    public string UiSettingsPath
+    {
+        get { return Path.Combine(InstallDirectory, "ui-settings.ini"); }
     }
 
     public string SavedConnectionsNotePath
@@ -476,31 +510,45 @@ internal sealed class UninstallLayout
 
 internal static class UninstallerEngine
 {
+    private static readonly string[] GeneratedIconFileNames = new string[]
+    {
+        "reminder-v1.ico",
+        "work-v1.ico",
+        "production-v1.ico",
+        "test-v1.ico",
+        "personal-v1.ico"
+    };
+
+    internal static void ValidateUninstallRoots(UninstallLayout layout)
+    {
+        if (layout == null)
+            throw new ArgumentNullException("layout");
+
+        ValidateDirectoryRoot(layout.InstallDirectory,
+            "The application folder");
+        ValidateDirectoryRoot(layout.StartMenuDirectory,
+            "The Start menu folder");
+    }
+
     public static void Uninstall(UninstallLayout layout, bool removeRegistration,
         bool removeSavedConnections)
     {
         if (layout == null)
             throw new ArgumentNullException("layout");
 
+        // Perform all root checks before publisher cleanup can launch a process
+        // and before any file, shortcut, registry, or profile mutation occurs.
+        ValidateUninstallRoots(layout);
         RemovePublisherTrust(layout);
         DeleteFileIfPresent(layout.UpdateSettingsPath);
+        DeleteFileIfPresent(layout.UiSettingsPath);
         DeleteFileIfPresent(layout.RuntimePath);
         DeleteFileIfPresent(layout.SetupPath);
         DeleteFileIfPresent(layout.UninstallerPath);
         DeleteFileIfPresent(layout.SetupShortcutPath);
         DeleteFileIfPresent(layout.UninstallShortcutPath);
 
-        if (Directory.Exists(layout.StartMenuDirectory))
-        {
-            try
-            {
-                Directory.Delete(layout.StartMenuDirectory, false);
-            }
-            catch (IOException)
-            {
-                // Keep the folder when it contains anything not owned by this app.
-            }
-        }
+        TryDeleteEmptyManagedDirectory(layout.StartMenuDirectory);
 
         if (removeRegistration)
         {
@@ -516,8 +564,8 @@ internal static class UninstallerEngine
         {
             RemoveSavedConnections(layout);
             DeleteFileIfPresent(layout.SavedConnectionsNotePath);
-            TryDeleteEmptyDirectory(layout.ProfilesDirectory);
-            TryDeleteEmptyDirectory(layout.InstallDirectory);
+            TryDeleteEmptyManagedDirectory(layout.ProfilesDirectory);
+            TryDeleteEmptyManagedDirectory(layout.InstallDirectory);
         }
         else
         {
@@ -527,14 +575,8 @@ internal static class UninstallerEngine
 
     private static void RemoveSavedConnections(UninstallLayout layout)
     {
-        if (Directory.Exists(layout.ProfilesDirectory) &&
-            (File.GetAttributes(layout.ProfilesDirectory) &
-                FileAttributes.ReparsePoint) != 0)
-            throw new InvalidOperationException(
-                "The app profiles folder is a link, so saved connections were not " +
-                "removed. Remove that folder manually after checking its target.");
-
-        string[] profileDirectories = Directory.Exists(layout.ProfilesDirectory)
+        string[] profileDirectories = IsRegularDirectory(
+                layout.ProfilesDirectory)
             ? Directory.GetDirectories(layout.ProfilesDirectory, "*",
                 SearchOption.TopDirectoryOnly)
             : new string[0];
@@ -553,20 +595,69 @@ internal static class UninstallerEngine
         {
             string profileId = Path.GetFileName(profileDirectory);
             if (!IsCanonicalProfileId(profileId) ||
-                (File.GetAttributes(profileDirectory) &
-                    FileAttributes.ReparsePoint) != 0 ||
+                !IsRegularDirectory(profileDirectory) ||
                 !IsDirectChild(layout.ProfilesDirectory, profileDirectory))
                 continue;
 
-            DeleteFileIfPresent(Path.Combine(profileDirectory, "settings.ini"));
-            DeleteFileIfPresent(Path.Combine(profileDirectory, "connection.rdp"));
-            TryDeleteEmptyDirectory(profileDirectory);
+            DeleteOwnedRegularFileIfPresent(
+                Path.Combine(profileDirectory, "settings.ini"));
+            DeleteOwnedRegularFileIfPresent(
+                Path.Combine(profileDirectory, "connection.rdp"));
+            TryDeleteEmptyManagedDirectory(profileDirectory);
         }
+
+        RemoveGeneratedIcons(layout);
+        RemoveAbandonedOneTimeProfiles(layout);
+    }
+
+    private static void RemoveGeneratedIcons(UninstallLayout layout)
+    {
+        if (!IsRegularDirectory(layout.IconsDirectory))
+            return;
+
+        foreach (string fileName in GeneratedIconFileNames)
+        {
+            string iconPath = Path.GetFullPath(Path.Combine(
+                layout.IconsDirectory, fileName));
+            if (IsDirectFile(layout.IconsDirectory, iconPath))
+                DeleteOwnedRegularFileIfPresent(iconPath);
+        }
+        TryDeleteEmptyManagedDirectory(layout.IconsDirectory);
+    }
+
+    private static void RemoveAbandonedOneTimeProfiles(
+        UninstallLayout layout)
+    {
+        if (!IsRegularDirectory(layout.OneTimeProfilesDirectory))
+            return;
+
+        string[] profileDirectories = Directory.GetDirectories(
+            layout.OneTimeProfilesDirectory, "*", SearchOption.TopDirectoryOnly);
+        foreach (string profileDirectory in profileDirectories)
+        {
+            string profileId = Path.GetFileName(profileDirectory);
+            if (!IsCanonicalProfileId(profileId) ||
+                !IsRegularDirectory(profileDirectory) ||
+                !IsDirectChild(layout.OneTimeProfilesDirectory,
+                    profileDirectory))
+                continue;
+
+            DeleteOwnedRegularFileIfPresent(
+                Path.Combine(profileDirectory, "settings.ini"));
+            DeleteOwnedRegularFileIfPresent(
+                Path.Combine(profileDirectory, "connection.rdp"));
+            TryDeleteEmptyManagedDirectory(profileDirectory);
+        }
+        TryDeleteEmptyManagedDirectory(layout.OneTimeProfilesDirectory);
     }
 
     private static bool IsOwnedDesktopShortcut(string shortcutPath,
         UninstallLayout layout)
     {
+        if (!IsRegularFile(shortcutPath) ||
+            !IsRegularDirectory(layout.ProfilesDirectory))
+            return false;
+
         string target;
         string arguments;
         if (!TryReadShortcut(shortcutPath, out target, out arguments) ||
@@ -586,9 +677,7 @@ internal static class UninstallerEngine
         string profileDirectory = Path.Combine(
             layout.ProfilesDirectory, profileId);
         return IsDirectChild(layout.ProfilesDirectory, profileDirectory) &&
-            Directory.Exists(profileDirectory) &&
-            (File.GetAttributes(profileDirectory) &
-                FileAttributes.ReparsePoint) == 0;
+            IsRegularDirectory(profileDirectory);
     }
 
     private static bool TryReadShortcut(string path, out string target,
@@ -652,6 +741,12 @@ internal static class UninstallerEngine
         return PathsEqual(actualParent, Path.GetFullPath(parent));
     }
 
+    private static bool IsDirectFile(string parent, string file)
+    {
+        string actualParent = Path.GetDirectoryName(Path.GetFullPath(file));
+        return PathsEqual(actualParent, Path.GetFullPath(parent));
+    }
+
     private static bool PathsEqual(string first, string second)
     {
         if (string.IsNullOrEmpty(first) || string.IsNullOrEmpty(second))
@@ -661,9 +756,64 @@ internal static class UninstallerEngine
             StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void TryDeleteEmptyDirectory(string path)
+    private static void ValidateDirectoryRoot(string path, string description)
     {
-        if (!Directory.Exists(path))
+        FileAttributes attributes;
+        if (!TryGetAttributes(path, out attributes))
+            return;
+        if ((attributes & FileAttributes.Directory) == 0)
+            throw new InvalidOperationException(
+                description + " is not a directory. No uninstall changes were made.");
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException(
+                description + " is a link or junction. No uninstall changes were made.");
+    }
+
+    private static bool TryGetAttributes(string path,
+        out FileAttributes attributes)
+    {
+        try
+        {
+            attributes = File.GetAttributes(path);
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            attributes = 0;
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            attributes = 0;
+            return false;
+        }
+    }
+
+    private static bool IsRegularDirectory(string path)
+    {
+        FileAttributes attributes;
+        return TryGetAttributes(path, out attributes) &&
+            (attributes & FileAttributes.Directory) != 0 &&
+            (attributes & FileAttributes.ReparsePoint) == 0;
+    }
+
+    private static bool IsRegularFile(string path)
+    {
+        FileAttributes attributes;
+        return TryGetAttributes(path, out attributes) &&
+            (attributes & (FileAttributes.Directory |
+                FileAttributes.ReparsePoint)) == 0;
+    }
+
+    private static void DeleteOwnedRegularFileIfPresent(string path)
+    {
+        if (IsRegularFile(path))
+            File.Delete(path);
+    }
+
+    private static void TryDeleteEmptyManagedDirectory(string path)
+    {
+        if (!IsRegularDirectory(path))
             return;
         try
         {
@@ -762,6 +912,8 @@ internal static class UninstallerEngine
             layout.ProfilesDirectory + Environment.NewLine +
             "- Every connection.rdp and settings.ini file in those profiles" +
             Environment.NewLine +
+            "- Generated shortcut icons and any abandoned one-time profile " +
+            "copies under the application folder" + Environment.NewLine +
             "- Desktop reminder shortcuts; copies moved outside the Desktop folder " +
             "were not searched for" +
             Environment.NewLine + Environment.NewLine +
@@ -814,6 +966,7 @@ internal static class UninstallerEngine
                 Encoding.ASCII.GetBytes("uninstaller"));
             File.WriteAllText(layout.UpdateSettingsPath,
                 "AutomaticChecks=1\nLastCheckUtc=fixture\n");
+            File.WriteAllText(layout.UiSettingsPath, "Theme=Light\n");
             File.WriteAllBytes(layout.SetupShortcutPath,
                 Encoding.ASCII.GetBytes("setup shortcut"));
             File.WriteAllBytes(layout.UninstallShortcutPath,
@@ -833,6 +986,17 @@ internal static class UninstallerEngine
                 importedProfileDirectory, "connection.rdp");
             string originalImportedRdpPath = Path.Combine(
                 externalDirectory, "original-imported.rdp");
+            string retainedIconDirectory = layout.IconsDirectory;
+            string retainedIconPath = Path.Combine(
+                retainedIconDirectory, "reminder-v1.ico");
+            const string retainedOneTimeId =
+                "55555555555555555555555555555555";
+            string retainedOneTimeDirectory = Path.Combine(
+                layout.OneTimeProfilesDirectory, retainedOneTimeId);
+            string retainedOneTimeSettings = Path.Combine(
+                retainedOneTimeDirectory, "settings.ini");
+            string retainedOneTimeRdp = Path.Combine(
+                retainedOneTimeDirectory, "connection.rdp");
             string otherAppFile = Path.Combine(installDirectory, "keep.txt");
             string desktopShortcut = Path.Combine(
                 desktopDirectory, "Remote generated.lnk");
@@ -851,6 +1015,12 @@ internal static class UninstallerEngine
                 "full address:s:imported-copy\r\nmarker:s:profile-copy\r\n");
             byte[] originalImportedRdpBytes = Encoding.Unicode.GetBytes(
                 "full address:s:original-import\r\nmarker:s:external-original\r\n");
+            byte[] retainedIconBytes = new byte[] { 0, 1, 0, 0, 9, 8, 7 };
+            byte[] retainedOneTimeSettingsBytes = Encoding.UTF8.GetBytes(
+                "retained-one-time-settings");
+            byte[] retainedOneTimeRdpBytes = new byte[] {
+                0, 255, 13, 10, 128, 42, 7, 0
+            };
             byte[] otherAppBytes = new byte[] { 0, 1, 2, 127, 128, 254, 255 };
             byte[] desktopShortcutBytes = Encoding.UTF8.GetBytes(
                 "desktop-shortcut-fixture");
@@ -865,6 +1035,13 @@ internal static class UninstallerEngine
             File.WriteAllBytes(importedRdpCopyPath, importedRdpBytes);
             File.WriteAllBytes(originalImportedRdpPath,
                 originalImportedRdpBytes);
+            Directory.CreateDirectory(retainedIconDirectory);
+            Directory.CreateDirectory(retainedOneTimeDirectory);
+            File.WriteAllBytes(retainedIconPath, retainedIconBytes);
+            File.WriteAllBytes(retainedOneTimeSettings,
+                retainedOneTimeSettingsBytes);
+            File.WriteAllBytes(retainedOneTimeRdp,
+                retainedOneTimeRdpBytes);
             File.WriteAllBytes(otherAppFile, otherAppBytes);
             File.WriteAllBytes(desktopShortcut, desktopShortcutBytes);
             File.WriteAllBytes(movedShortcut, movedShortcutBytes);
@@ -878,6 +1055,7 @@ internal static class UninstallerEngine
                 File.Exists(layout.SetupPath) ||
                 File.Exists(layout.UninstallerPath) ||
                 File.Exists(layout.UpdateSettingsPath) ||
+                File.Exists(layout.UiSettingsPath) ||
                 File.Exists(layout.SetupShortcutPath) ||
                 File.Exists(layout.UninstallShortcutPath))
                 return 50;
@@ -892,6 +1070,12 @@ internal static class UninstallerEngine
                     File.ReadAllBytes(importedRdpCopyPath)) ||
                 !BytesEqual(originalImportedRdpBytes,
                     File.ReadAllBytes(originalImportedRdpPath)) ||
+                !BytesEqual(retainedIconBytes,
+                    File.ReadAllBytes(retainedIconPath)) ||
+                !BytesEqual(retainedOneTimeSettingsBytes,
+                    File.ReadAllBytes(retainedOneTimeSettings)) ||
+                !BytesEqual(retainedOneTimeRdpBytes,
+                    File.ReadAllBytes(retainedOneTimeRdp)) ||
                 !BytesEqual(otherAppBytes, File.ReadAllBytes(otherAppFile)) ||
                 !BytesEqual(desktopShortcutBytes,
                     File.ReadAllBytes(desktopShortcut)) ||
@@ -1046,9 +1230,51 @@ internal static class UninstallerEngine
         string nonProfilePath = Path.Combine(nonProfile, "settings.ini");
         File.WriteAllBytes(nonProfilePath, nonProfileBytes);
 
+        string iconsDirectory = layout.IconsDirectory;
+        Directory.CreateDirectory(iconsDirectory);
+        string generatedIcon = Path.Combine(iconsDirectory,
+            "reminder-v1.ico");
+        File.WriteAllBytes(generatedIcon,
+            new byte[] { 0, 1, 0, 0, 7, 6, 5, 4 });
+        string unknownIcon = Path.Combine(iconsDirectory, "custom.ico");
+        byte[] unknownIconBytes = new byte[] { 9, 8, 7, 6, 5 };
+        File.WriteAllBytes(unknownIcon, unknownIconBytes);
+
+        const string firstOneTimeId = "66666666666666666666666666666666";
+        const string secondOneTimeId = "77777777777777777777777777777777";
+        string firstOneTime = Path.Combine(layout.OneTimeProfilesDirectory,
+            firstOneTimeId);
+        string secondOneTime = Path.Combine(layout.OneTimeProfilesDirectory,
+            secondOneTimeId);
+        string unknownOneTime = Path.Combine(layout.OneTimeProfilesDirectory,
+            "not-a-profile");
+        Directory.CreateDirectory(firstOneTime);
+        Directory.CreateDirectory(secondOneTime);
+        Directory.CreateDirectory(unknownOneTime);
+        File.WriteAllText(Path.Combine(firstOneTime, "settings.ini"),
+            "temporary-settings");
+        byte[] opaqueImportedRdp = new byte[] {
+            0, 255, 254, 1, 13, 10, 128, 64, 0
+        };
+        File.WriteAllBytes(Path.Combine(firstOneTime, "connection.rdp"),
+            opaqueImportedRdp);
+        File.WriteAllText(Path.Combine(secondOneTime, "settings.ini"),
+            "temporary-settings-with-extra");
+        File.WriteAllBytes(Path.Combine(secondOneTime, "connection.rdp"),
+            opaqueImportedRdp);
+        byte[] oneTimeSentinel = Encoding.UTF8.GetBytes("keep-one-time-extra");
+        string oneTimeSentinelPath = Path.Combine(secondOneTime, "keep.bin");
+        File.WriteAllBytes(oneTimeSentinelPath, oneTimeSentinel);
+        byte[] unknownOneTimeBytes = Encoding.UTF8.GetBytes(
+            "keep-noncanonical-one-time");
+        string unknownOneTimePath = Path.Combine(unknownOneTime,
+            "connection.rdp");
+        File.WriteAllBytes(unknownOneTimePath, unknownOneTimeBytes);
+
         File.WriteAllText(layout.RuntimePath, "runtime");
         File.WriteAllText(layout.UninstallerPath, "uninstaller");
         File.WriteAllText(layout.UpdateSettingsPath, "AutomaticChecks=1");
+        File.WriteAllText(layout.UiSettingsPath, "Theme=Light");
         File.WriteAllText(layout.SetupShortcutPath, "setup");
         File.WriteAllText(layout.UninstallShortcutPath, "uninstall");
         string keepMenu = Path.Combine(startMenuDirectory, "Keep.lnk");
@@ -1095,6 +1321,15 @@ internal static class UninstallerEngine
             Directory.Exists(firstProfile) ||
             File.Exists(Path.Combine(secondProfile, "settings.ini")) ||
             File.Exists(Path.Combine(secondProfile, "connection.rdp")) ||
+            File.Exists(generatedIcon) ||
+            !BytesEqual(unknownIconBytes, File.ReadAllBytes(unknownIcon)) ||
+            Directory.Exists(firstOneTime) ||
+            File.Exists(Path.Combine(secondOneTime, "settings.ini")) ||
+            File.Exists(Path.Combine(secondOneTime, "connection.rdp")) ||
+            !BytesEqual(oneTimeSentinel,
+                File.ReadAllBytes(oneTimeSentinelPath)) ||
+            !BytesEqual(unknownOneTimeBytes,
+                File.ReadAllBytes(unknownOneTimePath)) ||
             !BytesEqual(profileSentinel,
                 File.ReadAllBytes(profileSentinelPath)) ||
             !BytesEqual(nonProfileBytes, File.ReadAllBytes(nonProfilePath)) ||
@@ -1102,6 +1337,7 @@ internal static class UninstallerEngine
             !BytesEqual(rootSentinelBytes, File.ReadAllBytes(rootSentinel)) ||
             File.Exists(layout.SavedConnectionsNotePath) ||
             File.Exists(layout.UpdateSettingsPath) ||
+            File.Exists(layout.UiSettingsPath) ||
             File.Exists(layout.RuntimePath) ||
             File.Exists(layout.UninstallerPath) ||
             File.Exists(layout.SetupShortcutPath) ||
@@ -1131,9 +1367,21 @@ internal static class UninstallerEngine
         Directory.CreateDirectory(profile);
         File.WriteAllText(Path.Combine(profile, "settings.ini"), "clean");
         File.WriteAllText(Path.Combine(profile, "connection.rdp"), "clean");
+        Directory.CreateDirectory(layout.IconsDirectory);
+        File.WriteAllBytes(Path.Combine(layout.IconsDirectory,
+            "personal-v1.ico"), new byte[] { 0, 1, 0, 0, 3, 2, 1 });
+        const string oneTimeId = "88888888888888888888888888888888";
+        string oneTimeProfile = Path.Combine(
+            layout.OneTimeProfilesDirectory, oneTimeId);
+        Directory.CreateDirectory(oneTimeProfile);
+        File.WriteAllText(Path.Combine(oneTimeProfile, "settings.ini"),
+            "clean-one-time");
+        File.WriteAllBytes(Path.Combine(oneTimeProfile, "connection.rdp"),
+            new byte[] { 0, 255, 1, 254, 2 });
         File.WriteAllText(layout.RuntimePath, "runtime");
         File.WriteAllText(layout.UninstallerPath, "uninstaller");
         File.WriteAllText(layout.UpdateSettingsPath, "AutomaticChecks=0");
+        File.WriteAllText(layout.UiSettingsPath, "Theme=Dark");
         File.WriteAllText(layout.SetupShortcutPath, "setup");
         File.WriteAllText(layout.UninstallShortcutPath, "uninstall");
         string desktopShortcut = Path.Combine(desktopDirectory, "Clean.lnk");
