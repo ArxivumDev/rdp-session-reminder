@@ -1,5 +1,10 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$SigningCertificateThumbprint =
+        $env:RDP_REMINDER_SIGN_CERT_SHA1,
+    [string]$SigningTimestampUrl =
+        $env:RDP_REMINDER_SIGN_TIMESTAMP_URL
+)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -40,6 +45,29 @@ $setupOutput = Join-Path $distDirectory 'RdpSessionReminderSetup.exe'
 $installerOutput = Join-Path $distDirectory 'RdpSessionReminder-Installer.exe'
 $uninstallerOutput = Join-Path $distDirectory 'RdpSessionReminder-Uninstaller.exe'
 
+$signingRequested =
+    -not [string]::IsNullOrWhiteSpace($SigningCertificateThumbprint) -or
+    -not [string]::IsNullOrWhiteSpace($SigningTimestampUrl)
+if ($signingRequested -and
+    ([string]::IsNullOrWhiteSpace($SigningCertificateThumbprint) -or
+     [string]::IsNullOrWhiteSpace($SigningTimestampUrl))) {
+    throw 'Authenticode signing requires both a certificate thumbprint and an HTTPS RFC 3161 timestamp URL.'
+}
+if ($signingRequested) {
+    . (Join-Path $repoRoot 'tools\Authenticode.ps1')
+}
+
+function Invoke-OptionalSigning {
+    param([Parameter(Mandatory)][string[]]$Path)
+
+    if (-not $signingRequested) {
+        return
+    }
+    Invoke-RdpReminderAuthenticodeSigning -Path $Path `
+        -CertificateThumbprint $SigningCertificateThumbprint `
+        -TimestampUrl $SigningTimestampUrl
+}
+
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu `
     /reference:System.dll `
     /win32icon:$iconPath /win32manifest:$manifestPath `
@@ -47,6 +75,7 @@ $uninstallerOutput = Join-Path $distDirectory 'RdpSessionReminder-Uninstaller.ex
 if ($LASTEXITCODE -ne 0) {
     throw 'The reminder runtime failed to compile.'
 }
+Invoke-OptionalSigning -Path $runtimeOutput
 
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu `
     /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
@@ -56,6 +85,7 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw 'The setup application failed to compile.'
 }
+Invoke-OptionalSigning -Path $setupOutput
 
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu `
     /reference:System.dll /reference:System.Drawing.dll `
@@ -65,6 +95,7 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw 'The uninstaller failed to compile.'
 }
+Invoke-OptionalSigning -Path $uninstallerOutput
 
 $runtimeResourceArgument = "/resource:$runtimeOutput,RdpSessionReminder.Payload.Runtime"
 $setupResourceArgument = "/resource:$setupOutput,RdpSessionReminder.Payload.Setup"
@@ -79,12 +110,15 @@ $uninstallerResourceArgument =
 if ($LASTEXITCODE -ne 0) {
     throw 'The installer failed to compile.'
 }
+Invoke-OptionalSigning -Path $installerOutput
 
 & (Join-Path $repoRoot 'tests\SmokeTests.ps1') -DistDirectory $distDirectory
 & (Join-Path $repoRoot 'tests\ReflectionChecks.ps1') -DistDirectory $distDirectory
 & (Join-Path $repoRoot 'tests\UpdaterChecks.ps1') -DistDirectory $distDirectory
 & (Join-Path $repoRoot 'tests\InstallerChecks.ps1') `
     -RepoRoot $repoRoot -DistDirectory $distDirectory
+& (Join-Path $repoRoot 'tests\AuthenticodeChecks.ps1') `
+    -RepoRoot $repoRoot
 
 $packageDirectory = Join-Path $distDirectory 'package'
 New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
