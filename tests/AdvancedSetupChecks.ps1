@@ -78,6 +78,7 @@ try {
     if (-not $selection.UseMultimon -or
         $selection.SelectedMonitorsSetting -ne '0,1' -or
         $selection.ReminderMonitorId -ne 1 -or
+        $selection.ReminderDeviceName -ne 'DISPLAY-B' -or
         $firstMonitor.DisplayNumber -ne 1 -or
         $secondMonitor.DisplayNumber -ne 2) {
         throw 'Monitor selection did not preserve zero-based mstsc IDs and one-based labels.'
@@ -94,6 +95,37 @@ try {
     if ($reverseSelection.SelectedMonitorsSetting -ne '1,0' -or
         $reverseSelection.RemotePrimaryMonitorId -ne 1) {
         throw 'Monitor selection lost the caller-selected remote primary display.'
+    }
+
+    $disconnectedMonitors = [Activator]::CreateInstance($monitorListType)
+    $disconnectedMonitors.Add($firstMonitor)
+    $thirdMonitor = $monitorConstructor.Invoke(@(
+        [int]2,
+        [string]'DISPLAY-C',
+        [Drawing.Rectangle]::new(5000, 0, 1920, 1080),
+        [Drawing.Rectangle]::new(5000, 0, 1920, 1040),
+        [bool]$false
+    ))
+    $disconnectedMonitors.Add($thirdMonitor)
+    $disconnectedIds = [Collections.Generic.List[int]]::new()
+    $disconnectedIds.Add(0)
+    $disconnectedIds.Add(2)
+    $disconnected = [Activator]::CreateInstance(
+        $selectionType, @($disconnectedMonitors, $disconnectedIds, [int]0))
+    if ($disconnected.GetCompatibilityWarnings().Count -ne 1) {
+        throw 'A disconnected Remote Desktop monitor selection was not detected.'
+    }
+    try {
+        $disconnected.ValidateForRdp()
+        throw 'A disconnected Remote Desktop monitor selection was accepted.'
+    }
+    catch [Reflection.TargetInvocationException] {
+        if ($_.Exception.InnerException -isnot [InvalidOperationException]) {
+            throw
+        }
+    }
+    catch [InvalidOperationException] {
+        # PowerShell can either unwrap or preserve the reflection exception.
     }
 
     $singleId = [Collections.Generic.List[int]]::new()

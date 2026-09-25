@@ -106,6 +106,11 @@ internal sealed class MonitorSelection
 
     public int ReminderMonitorId { get; private set; }
 
+    public string ReminderDeviceName
+    {
+        get { return FindMonitor(ReminderMonitorId).DeviceName; }
+    }
+
     // selectedmonitors is effective only with multimon enabled. Enabling it for
     // a one-monitor selection is intentional: it lets a non-primary monitor be
     // selected explicitly rather than silently falling back to the primary one.
@@ -217,6 +222,13 @@ internal sealed class MonitorSelection
             };
         }
         return new string[0];
+    }
+
+    public void ValidateForRdp()
+    {
+        string[] warnings = GetCompatibilityWarnings();
+        if (warnings.Length > 0)
+            throw new InvalidOperationException(warnings[0]);
     }
 
     public int RemotePrimaryMonitorId
@@ -774,6 +786,15 @@ internal sealed class MonitorSelectionDialog : Form
         }
         SyncToLayout();
         Selection = layout.GetSelection();
+        string[] warnings = Selection.GetCompatibilityWarnings();
+        if (warnings.Length > 0)
+        {
+            warningLabel.Text = warnings[0];
+            MessageBox.Show(this, warnings[0], AppPaths.ProductName,
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Selection = null;
+            return;
+        }
         DialogResult = DialogResult.OK;
         Close();
     }
