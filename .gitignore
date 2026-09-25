@@ -1,0 +1,11 @@
+dist/
+bin/
+obj/
+*.pdb
+*.user
+*.suo
+settings.ini
+.vs/
+.idea/
+Thumbs.db
+Desktop.ini
