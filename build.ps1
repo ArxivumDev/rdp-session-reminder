@@ -29,10 +29,16 @@ if (-not $compiler) {
 $commonSource = Join-Path $sourceDirectory 'Common.cs'
 $runtimeSource = Join-Path $sourceDirectory 'RdpSessionReminder.cs'
 $setupSource = Join-Path $sourceDirectory 'RdpSessionReminderSetup.cs'
+$updateSupportSource = Join-Path $sourceDirectory 'UpdateSupport.cs'
+$updateUiSource = Join-Path $sourceDirectory 'UpdateUi.cs'
+$installerSource = Join-Path $sourceDirectory 'RdpSessionReminderInstaller.cs'
+$uninstallerSource = Join-Path $sourceDirectory 'RdpSessionReminderUninstaller.cs'
 $iconPath = Join-Path $assetDirectory 'RdpSessionReminder.ico'
 $manifestPath = Join-Path $assetDirectory 'app.manifest'
 $runtimeOutput = Join-Path $distDirectory 'RdpSessionReminder.exe'
 $setupOutput = Join-Path $distDirectory 'RdpSessionReminderSetup.exe'
+$installerOutput = Join-Path $distDirectory 'RdpSessionReminder-Installer.exe'
+$uninstallerOutput = Join-Path $distDirectory 'RdpSessionReminder-Uninstaller.exe'
 
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu `
     /reference:System.dll `
@@ -43,16 +49,42 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu `
-    /reference:System.dll /reference:System.Drawing.dll `
+    /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll `
     /win32icon:$iconPath /win32manifest:$manifestPath `
-    /out:$setupOutput $commonSource $setupSource
+    /out:$setupOutput $commonSource $updateSupportSource $updateUiSource $setupSource
 if ($LASTEXITCODE -ne 0) {
     throw 'The setup application failed to compile.'
 }
 
+& $compiler /nologo /target:winexe /optimize+ /platform:anycpu `
+    /reference:System.dll /reference:System.Drawing.dll `
+    /reference:System.Windows.Forms.dll `
+    /win32icon:$iconPath /win32manifest:$manifestPath `
+    /out:$uninstallerOutput $uninstallerSource
+if ($LASTEXITCODE -ne 0) {
+    throw 'The uninstaller failed to compile.'
+}
+
+$runtimeResourceArgument = "/resource:$runtimeOutput,RdpSessionReminder.Payload.Runtime"
+$setupResourceArgument = "/resource:$setupOutput,RdpSessionReminder.Payload.Setup"
+$uninstallerResourceArgument =
+    "/resource:$uninstallerOutput,RdpSessionReminder.Payload.Uninstaller"
+
+& $compiler /nologo /target:winexe /optimize+ /platform:anycpu `
+    /reference:System.dll /reference:System.Windows.Forms.dll `
+    /win32icon:$iconPath /win32manifest:$manifestPath `
+    $runtimeResourceArgument $setupResourceArgument $uninstallerResourceArgument `
+    /out:$installerOutput $installerSource
+if ($LASTEXITCODE -ne 0) {
+    throw 'The installer failed to compile.'
+}
+
 & (Join-Path $repoRoot 'tests\SmokeTests.ps1') -DistDirectory $distDirectory
 & (Join-Path $repoRoot 'tests\ReflectionChecks.ps1') -DistDirectory $distDirectory
+& (Join-Path $repoRoot 'tests\UpdaterChecks.ps1') -DistDirectory $distDirectory
+& (Join-Path $repoRoot 'tests\InstallerChecks.ps1') `
+    -RepoRoot $repoRoot -DistDirectory $distDirectory
 
 $packageDirectory = Join-Path $distDirectory 'package'
 New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
@@ -65,7 +97,13 @@ Compress-Archive -Path (Join-Path $packageDirectory '*') `
     -DestinationPath $archivePath -CompressionLevel Optimal
 Remove-Item -LiteralPath $packageDirectory -Recurse -Force
 
-$checksumFiles = @($runtimeOutput, $setupOutput, $archivePath)
+$checksumFiles = @(
+    $runtimeOutput,
+    $setupOutput,
+    $installerOutput,
+    $uninstallerOutput,
+    $archivePath
+)
 $checksumLines = foreach ($file in $checksumFiles) {
     $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $([IO.Path]::GetFileName($file))"
@@ -79,6 +117,8 @@ $checksumPath = Join-Path $distDirectory 'SHA256SUMS.txt'
 [pscustomobject]@{
     Runtime = $runtimeOutput
     Setup = $setupOutput
+    Installer = $installerOutput
+    Uninstaller = $uninstallerOutput
     Package = $archivePath
     Checksums = $checksumPath
 }

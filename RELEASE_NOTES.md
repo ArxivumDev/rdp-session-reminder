@@ -1,75 +1,99 @@
-# RDP Session Reminder v1.0.1
+# RDP Session Reminder v1.1.0
 
-This maintenance release makes the reminder match the connection more reliably
-and improves how it follows the Remote Desktop process from launch through exit.
+This release adds a guided custom `.rdp` profile creator while keeping the
+reminder local, lightweight, and scoped to one generated shortcut.
 
-## Fixed in this release
+## Custom connection profiles
 
-- Direct targets now accept canonical IPv4 addresses with ports, such as
-  `10.0.0.25:3390`, while rejecting ambiguous whitespace, control characters,
-  non-ASCII port digits, and leading-zero IPv4 forms.
-- When an `.rdp` file is selected, setup uses its nonempty
-  `alternate full address:s:` value when present and otherwise uses
-  `full address:s:`. The Computer field becomes read-only in this mode so its
-  displayed target cannot drift from the file's advertised target.
-- Setup rechecks the target in the verified profile copy, and the runtime always
-  launches that profile's own `connection.rdp`. The runtime also refreshes an
-  older profile's auto-generated target label from that copy while preserving
-  custom reminder text.
-- Each launch now tracks the Remote Desktop processes created for that shortcut
-  in a private Windows Job object. The reminder attaches only to a verified
-  Remote Desktop process from that launch.
-- Cancelling a Remote Desktop security or sign-in prompt now ends the pending
-  reminder promptly. Leaving a legitimate prompt open for more than five minutes
-  no longer causes the reminder to give up.
-- Per-shortcut mutex ownership is handled correctly after stopped or abandoned
-  launches.
-- Banner dimensions and text now follow the selected display's scaling and
-  refresh when that scaling changes.
-- Shortcut names that are reserved Windows device names are rejected.
+- Enter a computer name, full DNS name, IP address, or optional port and setup
+  writes a private `.rdp` profile for that shortcut.
+- Choose the native/current display size or a common smaller resolution.
+- Start full screen on one display or span all local displays.
+- The connection bar is available in full screen, keyboard shortcuts follow the
+  full-screen behavior, and audio keeps the Windows Remote Desktop defaults.
+- Profiles use 32-bit color and high visual settings with automatic network and
+  bandwidth detection, compression, multimedia optimization, persistent bitmap
+  caching, automatic reconnect, and a warning if server authentication fails.
 
-## `.rdp` files and custom labels
+## Resource and sign-in choices
 
-Setup reads the selected file locally and interprets only its advertised
-connection address to choose the default Computer, shortcut, and reminder labels.
-It then copies the `.rdp` file byte-for-byte into that shortcut's private profile
-and does not modify the original or the copy. The Reminder text remains
-customizable even though the Computer field is read-only in `.rdp` mode.
+Setup now offers explicit controls for clipboard, drives, location, serial
+ports, WebAuthn passkeys or security keys, and smart cards or Windows Hello for
+Business. The destination computer or its policy can still refuse a requested
+redirection.
 
-Every setup run creates a separate profile and desktop shortcut. Its target,
-file, reminder text, and display apply only to that shortcut. To change any of
-those values, rerun setup, test the replacement shortcut, and delete the old
-shortcut when it is no longer needed.
+An **Always ask for credentials** option tells Windows Remote Desktop to prompt
+on every launch, which makes it possible to choose another account instead of
+silently using a credential already saved for that destination. The application
+does not read, change, or store passwords.
 
-## Local resource use and privacy
+## Optional local RDP publisher trust
 
-The banner is drawn by `RdpSessionReminder.exe` on the Windows PC that starts the
-connection. Nothing from this project is installed or run on the remote computer,
-so the reminder uses no memory there; the RDP session itself still uses normal
-Windows resources on that computer. The setup app exits after creating the
-shortcut, and the small reminder process closes when its associated RDP launch
-ends.
+Setup can create a unique, non-exportable signing key for the current Windows
+user, register only its SHA-256 fingerprint in that user's trusted `.rdp`
+publisher policy, and sign newly generated profiles after all settings are
+written. Its removal action deletes and verifies the exact app-owned certificate,
+associated private key, and SHA-256 pin while preserving unrelated certificates,
+keys, and trusted-publisher entries.
 
-RDP Session Reminder does not read credentials. Windows Credential Manager may
-store credentials when requested in Remote Desktop, and Remote Desktop itself
-may retain recently used targets in the current user's connection history. This
-application does not access or manage either store.
+This is `.rdp` publisher trust. It does not Authenticode-sign the application,
+change SmartScreen reputation, or establish the remote server's TLS identity.
+Imported `.rdp` files remain byte-for-byte unchanged and are not re-signed. On
+older or unpatched Windows installations that do not support SHA-256 trusted RDP
+publisher policy, the standard publisher/resource confirmation can still appear;
+the app does not fall back to SHA-1.
 
-## Update and uninstall
+Windows omits Location redirection from the protected RDP signature scope on
+affected systems. Setup detects the Location-plus-trust combination before it
+creates a certificate and asks the user to turn off one of those options.
 
-Close active sessions launched through reminder shortcuts before installing this
-update so Windows releases the shared executable. Older file-mode profiles are
-migrated from their trusted `.rdp` copy and have automatic labels refreshed at
-launch. Existing direct profiles with canonical targets remain compatible;
-recreate a direct shortcut if its old target uses an ambiguous form that v1.0.1
-now rejects, such as a leading-zero IPv4 address. Each setup run creates a new
-shortcut for the values entered.
+## Guided progress and updates
 
-It is safe to uninstall after the app has closed: delete its generated desktop
-shortcuts and `%LOCALAPPDATA%\RdpSessionReminder`. Uninstalling does not change
-original `.rdp` files or global Remote Desktop settings.
+Setup now shows progress while it installs its files, writes or verifies the RDP
+profile, applies optional publisher trust, saves settings, creates the desktop
+shortcut, and starts Remote Desktop. Reminder shortcuts have an empty **Start
+in** field, preventing a stale-folder error in Windows shortcut Properties.
 
-The release ZIP and SHA-256 checksum file are produced by the successful GitHub
-Actions build for the v1.0.1 tag, which also creates GitHub build-provenance
-attestations for both files. The executables are not code-signed, so Windows may
-identify the publisher as unknown.
+The new **Updates** tab supports manual checks and optional checks at most once a
+day when setup opens. It shows cumulative notes for every stable release newer
+than the installed version, then updates directly to the newest release rather
+than running intermediate installers. Before launch, the downloaded installer
+must match both `SHA256SUMS.txt` and GitHub's required asset digest. The installer
+is checked again immediately before it is opened, and the user must confirm. No
+background updater service or scheduled task is installed.
+
+## Compatibility and resource use
+
+Existing v1.0.x shortcuts and profiles remain readable. New direct connections
+use their own generated `.rdp` file. Imported profiles keep their original
+settings and disable the custom connection controls in setup.
+
+The reminder still runs only on the connecting PC and only while its associated
+RDP launch is active. No service, scheduled task, browser runtime, or remote-side
+agent is added.
+
+## Installer and preserved connections
+
+The release now includes a per-user installer, a standalone uninstaller, and the
+portable ZIP. The installer needs no administrator rights and adds setup and
+uninstall entries to the Start menu.
+
+Managed uninstall removes the app binaries, Start menu entries, update settings,
+registration, and app-owned RDP publisher trust. By default it preserves all
+generated and imported profile copies, settings, and reminder shortcuts. A UTF-8
+`README - Saved RDP Connections.txt` note explains that preserved `.lnk`
+launchers require a reinstall, preserved `connection.rdp` files can be opened
+directly, and users can manually delete the retained app-data folder and moved
+copies.
+
+An explicitly selected and separately confirmed option removes canonical app
+profile connection/settings files and verified reminder shortcuts currently in
+the Desktop folder. Original imported files, unrelated shortcuts, extra profile
+files, and copies moved elsewhere remain untouched. The uninstaller never scans
+other folders or drives for connection files or shortcuts.
+
+The installer, standalone uninstaller, portable ZIP, and SHA-256 checksum file
+are produced by the successful GitHub Actions build for the v1.1.0 tag. Tagged
+workflows also create GitHub build-provenance attestations. The release
+executables remain unsigned, so Windows can identify the application publisher
+as unknown.

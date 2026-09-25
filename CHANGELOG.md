@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.1.0 - 2026-09-25
+
+- Generate one private `.rdp` connection profile for each new direct shortcut
+- Add native/current and common smaller remote-desktop resolution choices
+- Add an all-displays option while keeping the full-screen connection bar visible
+- Apply 32-bit color, high visual settings, automatic network detection,
+  persistent bitmap caching, default audio, full-screen keyboard handling,
+  automatic reconnect, and server-authentication warnings
+- Add explicit clipboard, drive, location, serial-port, WebAuthn, and smart-card
+  or Windows Hello for Business redirection choices
+- Add an **Always ask for credentials** option without reading or storing passwords
+- Add optional per-user SHA-256 trusted RDP publisher setup, automatic signing of
+  newly generated profiles, and matching trust removal
+- Keep imported `.rdp` files byte-for-byte unchanged and do not re-sign them
+- Clarify that RDP publisher trust is separate from executable signing,
+  SmartScreen reputation, and remote-server TLS identity
+- Add per-user installer and standalone uninstaller packages with Start menu
+  entries and automatic removal of only app-owned publisher trust
+- Preserve every generated or imported profile and reminder shortcut by default
+  during managed uninstall, and leave a UTF-8 note explaining direct use,
+  reinstall, and optional manual deletion without scanning the user's drives
+- Add a separately confirmed cleanup option for canonical app profiles and
+  verified reminder shortcuts in the original Desktop folder
+- Remove and verify the exact app-owned RDP publisher certificate, private key,
+  and SHA-256 policy pin while preserving unrelated trust material
+- Show live setup progress and create reminder shortcuts with a blank **Start in**
+  field so Windows shortcut Properties remains usable after folder changes
+- Add manual and optional once-daily update checks, cumulative release notes,
+  direct-to-latest upgrades, and SHA-256 verification before installer launch
+- Keep existing v1.0.x profiles compatible and preserve the service-free,
+  client-side reminder design
+
 ## 1.0.1 - 2026-09-25
 
 - Accept canonical IPv4 addresses with ports and reject ambiguous targets with

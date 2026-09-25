@@ -12,8 +12,8 @@ using System.Threading;
 [assembly: AssemblyCompany("RDP Session Reminder contributors")]
 [assembly: AssemblyProduct("RDP Session Reminder")]
 [assembly: AssemblyCopyright("Copyright (c) 2026")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 internal static class RdpSessionReminder
 {

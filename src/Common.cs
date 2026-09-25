@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Net;
@@ -90,6 +91,123 @@ internal static class RdpFileTargetReader
             return "";
         }
         return alternateAddress.Length > 0 ? alternateAddress : fullAddress;
+    }
+}
+
+internal sealed class RdpProfileOptions
+{
+    public string ComputerName;
+    public bool FullScreen;
+    public int DesktopWidth;
+    public int DesktopHeight;
+    public bool UseAllMonitors;
+    public bool AlwaysAskForCredentials;
+    public bool RedirectClipboard;
+    public bool RedirectDrives;
+    public bool RedirectLocation;
+    public bool RedirectComPorts;
+    public bool RedirectWebAuthn;
+    public bool RedirectSmartCards;
+
+    public RdpProfileOptions(string computerName, bool fullScreen,
+        int desktopWidth, int desktopHeight, bool useAllMonitors,
+        bool alwaysAskForCredentials, bool redirectClipboard,
+        bool redirectDrives, bool redirectLocation, bool redirectComPorts,
+        bool redirectWebAuthn, bool redirectSmartCards)
+    {
+        ComputerName = computerName;
+        FullScreen = fullScreen;
+        DesktopWidth = desktopWidth;
+        DesktopHeight = desktopHeight;
+        UseAllMonitors = useAllMonitors;
+        AlwaysAskForCredentials = alwaysAskForCredentials;
+        RedirectClipboard = redirectClipboard;
+        RedirectDrives = redirectDrives;
+        RedirectLocation = redirectLocation;
+        RedirectComPorts = redirectComPorts;
+        RedirectWebAuthn = redirectWebAuthn;
+        RedirectSmartCards = redirectSmartCards;
+    }
+}
+
+internal static class RdpProfileWriter
+{
+    public static void Write(string path, RdpProfileOptions options)
+    {
+        if (options == null ||
+            !SettingsStore.IsValidComputerName(options.ComputerName))
+            throw new ArgumentException("A valid Remote Desktop target is required.");
+        if (options.DesktopWidth < 200 || options.DesktopWidth > 8192 ||
+            options.DesktopHeight < 200 || options.DesktopHeight > 8192)
+            throw new ArgumentOutOfRangeException(
+                "The Remote Desktop resolution must be between 200 and 8192 pixels.");
+
+        string computer = SettingsStore.NormalizeComputerName(options.ComputerName);
+        List<string> lines = new List<string>();
+        lines.Add("screen mode id:i:" + (options.FullScreen ? "2" : "1"));
+        lines.Add("use multimon:i:" + (options.UseAllMonitors ? "1" : "0"));
+        lines.Add("desktopwidth:i:" + options.DesktopWidth.ToString(
+            CultureInfo.InvariantCulture));
+        lines.Add("desktopheight:i:" + options.DesktopHeight.ToString(
+            CultureInfo.InvariantCulture));
+        lines.Add("session bpp:i:32");
+        lines.Add("compression:i:1");
+        lines.Add("keyboardhook:i:2");
+        lines.Add("audiocapturemode:i:0");
+        lines.Add("videoplaybackmode:i:1");
+        lines.Add("connection type:i:7");
+        lines.Add("networkautodetect:i:1");
+        lines.Add("bandwidthautodetect:i:1");
+        lines.Add("displayconnectionbar:i:1");
+        lines.Add("enableworkspacereconnect:i:0");
+        lines.Add("disable wallpaper:i:0");
+        lines.Add("allow font smoothing:i:1");
+        lines.Add("allow desktop composition:i:1");
+        lines.Add("disable full window drag:i:0");
+        lines.Add("disable menu anims:i:0");
+        lines.Add("disable themes:i:0");
+        lines.Add("disable cursor setting:i:0");
+        lines.Add("bitmapcachepersistenable:i:1");
+        lines.Add("full address:s:" + computer);
+        lines.Add("audiomode:i:0");
+        lines.Add("redirectprinters:i:0");
+        if (options.RedirectLocation)
+            lines.Add("redirectlocation:i:1");
+        lines.Add("redirectcomports:i:" + (options.RedirectComPorts ? "1" : "0"));
+        lines.Add("redirectsmartcards:i:" +
+            (options.RedirectSmartCards ? "1" : "0"));
+        lines.Add("redirectwebauthn:i:" +
+            (options.RedirectWebAuthn ? "1" : "0"));
+        lines.Add("redirectclipboard:i:" +
+            (options.RedirectClipboard ? "1" : "0"));
+        lines.Add("redirectposdevices:i:0");
+        lines.Add("autoreconnection enabled:i:1");
+        lines.Add("authentication level:i:2");
+        lines.Add("prompt for credentials:i:" +
+            (options.AlwaysAskForCredentials ? "1" : "0"));
+        lines.Add("negotiate security layer:i:1");
+        lines.Add("enablecredsspsupport:i:1");
+        lines.Add("remoteapplicationmode:i:0");
+        lines.Add("alternate shell:s:");
+        lines.Add("shell working directory:s:");
+        lines.Add("gatewayhostname:s:");
+        lines.Add("gatewayusagemethod:i:4");
+        lines.Add("gatewaycredentialssource:i:4");
+        lines.Add("gatewayprofileusagemethod:i:0");
+        lines.Add("promptcredentialonce:i:0");
+        lines.Add("gatewaybrokeringtype:i:0");
+        lines.Add("use redirection server name:i:0");
+        lines.Add("rdgiskdcproxy:i:0");
+        lines.Add("kdcproxyname:s:");
+        lines.Add("enablerdsaadauth:i:0");
+        lines.Add("drivestoredirect:s:" + (options.RedirectDrives ? "*" : ""));
+        lines.Add("remoteappmousemoveinject:i:1");
+        lines.Add("alternate full address:s:" + computer);
+
+        string directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+        File.WriteAllLines(path, lines.ToArray(), Encoding.Unicode);
     }
 }
 

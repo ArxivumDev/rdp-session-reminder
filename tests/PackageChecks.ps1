@@ -14,6 +14,8 @@ $checksumFile = Join-Path $dist 'SHA256SUMS.txt'
 $expectedFiles = @(
     'RdpSessionReminder.exe',
     'RdpSessionReminderSetup.exe',
+    'RdpSessionReminder-Installer.exe',
+    'RdpSessionReminder-Uninstaller.exe',
     'RdpSessionReminder-Windows.zip'
 )
 
@@ -23,6 +25,38 @@ foreach ($line in [IO.File]::ReadAllLines($checksumFile)) {
         throw "Invalid checksum line: $line"
     }
     $checksums[$Matches[2]] = $Matches[1]
+}
+
+$installerAssembly = [Reflection.Assembly]::LoadFile(
+    (Join-Path $dist 'RdpSessionReminder-Installer.exe'))
+$payloads = @{
+    'RdpSessionReminder.Payload.Runtime' = 'RdpSessionReminder.exe'
+    'RdpSessionReminder.Payload.Setup' = 'RdpSessionReminderSetup.exe'
+    'RdpSessionReminder.Payload.Uninstaller' =
+        'RdpSessionReminder-Uninstaller.exe'
+}
+foreach ($resourceName in $payloads.Keys) {
+    $stream = $installerAssembly.GetManifestResourceStream($resourceName)
+    if ($null -eq $stream) {
+        throw "Installer payload is missing: $resourceName"
+    }
+    try {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            $payloadHash = -join ($algorithm.ComputeHash($stream) |
+                ForEach-Object { $_.ToString('x2') })
+        }
+        finally {
+            $algorithm.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+    $fileName = $payloads[$resourceName]
+    if ($payloadHash -ne $checksums[$fileName]) {
+        throw "Embedded installer payload differs from build output: $fileName"
+    }
 }
 if ($checksums.Count -ne $expectedFiles.Count) {
     throw "Expected $($expectedFiles.Count) checksums, found $($checksums.Count)."
