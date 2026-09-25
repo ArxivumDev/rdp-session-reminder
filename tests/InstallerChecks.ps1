@@ -231,6 +231,8 @@ foreach ($requiredText in @(
     'settings.ini',
     'Generated and imported profile copies under:',
     'Every connection.rdp and settings.ini file in those profiles',
+    'reminder-v1.ico',
+    'reminder-v2.ico',
     'Original imported .rdp files were never changed or deleted.',
     'Desktop reminder shortcuts; copies moved outside the Desktop folder',
     'The app takes extra care to remove and verify only the exact app-owned',

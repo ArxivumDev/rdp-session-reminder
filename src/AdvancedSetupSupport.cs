@@ -1572,7 +1572,14 @@ internal sealed class ShortcutIconChoice
 internal static class ShortcutIconCatalog
 {
     private const string IconDirectoryName = "icons";
-    private const string CacheVersion = "v1";
+    // The filename is part of Explorer's icon-cache key. Increment this when
+    // the generated image or ICO encoding changes so repaired shortcuts do not
+    // keep rendering a cached image from an older release.
+    private const string CacheVersion = "v2";
+    private static readonly int[] GeneratedIconSizes = new int[]
+    {
+        16, 20, 24, 32, 40, 48, 64, 128, 256
+    };
 
     public static ShortcutIconChoice[] GetChoices()
     {
@@ -1669,7 +1676,7 @@ internal static class ShortcutIconCatalog
             throw new IOException(
                 "The generated icon destination is not a regular file.");
         if (File.Exists(choice.IconPath) &&
-            new FileInfo(choice.IconPath).Length > 128)
+            HasExpectedIconFrames(choice.IconPath))
             return;
 
         string temporaryPath = Path.Combine(directory,
@@ -1691,6 +1698,64 @@ internal static class ShortcutIconCatalog
     private static bool IsReparsePoint(string path)
     {
         return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+    }
+
+    private static bool HasExpectedIconFrames(string path)
+    {
+        try
+        {
+            using (FileStream input = new FileStream(path, FileMode.Open,
+                FileAccess.Read, FileShare.Read))
+            using (BinaryReader reader = new BinaryReader(input))
+            {
+                if (input.Length < 6 || reader.ReadUInt16() != 0 ||
+                    reader.ReadUInt16() != 1)
+                    return false;
+
+                int count = reader.ReadUInt16();
+                if (count <= 0 || count > 64 ||
+                    input.Length < 6L + (16L * count))
+                    return false;
+
+                HashSet<int> sizes = new HashSet<int>();
+                long minimumOffset = 6L + (16L * count);
+                for (int index = 0; index < count; index++)
+                {
+                    int width = reader.ReadByte();
+                    int height = reader.ReadByte();
+                    reader.ReadByte();
+                    reader.ReadByte();
+                    ushort planes = reader.ReadUInt16();
+                    ushort bitCount = reader.ReadUInt16();
+                    uint byteCount = reader.ReadUInt32();
+                    uint imageOffset = reader.ReadUInt32();
+                    width = width == 0 ? 256 : width;
+                    height = height == 0 ? 256 : height;
+
+                    ulong end = (ulong)imageOffset + (ulong)byteCount;
+                    if (width != height || planes != 1 || bitCount != 32 ||
+                        byteCount < 8 || imageOffset < minimumOffset ||
+                        end > (ulong)input.Length)
+                        return false;
+                    sizes.Add(width);
+                }
+
+                foreach (int requiredSize in GeneratedIconSizes)
+                {
+                    if (!sizes.Contains(requiredSize))
+                        return false;
+                }
+                return true;
+            }
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static void WriteIcon(string path, ShortcutIconKind kind)
@@ -1721,58 +1786,108 @@ internal static class ShortcutIconCatalog
                 break;
         }
 
-        using (Bitmap bitmap = new Bitmap(64, 64,
-            System.Drawing.Imaging.PixelFormat.Format32bppArgb))
-        using (Graphics graphics = Graphics.FromImage(bitmap))
+        List<byte[]> frames = new List<byte[]>();
+        foreach (int size in GeneratedIconSizes)
         {
-            graphics.Clear(Color.Transparent);
-            graphics.SmoothingMode =
-                System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (Bitmap bitmap = DrawIconFrame(size, accent, label))
+            using (MemoryStream encoded = new MemoryStream())
+            {
+                bitmap.Save(encoded, System.Drawing.Imaging.ImageFormat.Png);
+                frames.Add(encoded.ToArray());
+            }
+        }
 
-            Rectangle monitor = new Rectangle(5, 7, 54, 40);
-            using (Brush frame = new SolidBrush(Color.FromArgb(47, 54, 61)))
-            using (Brush screen = new SolidBrush(Color.FromArgb(240, 246, 252)))
-            using (Brush accentBrush = new SolidBrush(accent))
-            using (Pen stand = new Pen(Color.FromArgb(47, 54, 61), 5f))
+        using (FileStream output = new FileStream(path, FileMode.CreateNew,
+            FileAccess.Write, FileShare.None))
+        using (BinaryWriter writer = new BinaryWriter(output))
+        {
+            writer.Write((ushort)0);
+            writer.Write((ushort)1);
+            writer.Write((ushort)frames.Count);
+            int offset = 6 + (16 * frames.Count);
+            for (int index = 0; index < frames.Count; index++)
             {
-                graphics.FillRoundedRectangle(frame, monitor, 7);
-                graphics.FillRectangle(screen, 10, 12, 44, 26);
-                graphics.FillRectangle(accentBrush, 10, 31, 44, 7);
-                graphics.DrawLine(stand, 32, 47, 32, 54);
-                graphics.DrawLine(stand, 22, 56, 42, 56);
+                int size = GeneratedIconSizes[index];
+                writer.Write((byte)(size == 256 ? 0 : size));
+                writer.Write((byte)(size == 256 ? 0 : size));
+                writer.Write((byte)0);
+                writer.Write((byte)0);
+                writer.Write((ushort)1);
+                writer.Write((ushort)32);
+                writer.Write((uint)frames[index].Length);
+                writer.Write((uint)offset);
+                offset += frames[index].Length;
             }
-            using (Font labelFont = new Font(FontFamily.GenericSansSerif, 14f,
-                FontStyle.Bold, GraphicsUnit.Pixel))
-            {
-                TextRenderer.DrawText(graphics, label, labelFont,
-                    new Rectangle(10, 12, 44, 20), accent,
-                    TextFormatFlags.HorizontalCenter |
-                    TextFormatFlags.VerticalCenter |
-                    TextFormatFlags.NoPadding);
-            }
-
-            IntPtr iconHandle = bitmap.GetHicon();
-            try
-            {
-                using (Icon borrowed = Icon.FromHandle(iconHandle))
-                using (Icon owned = (Icon)borrowed.Clone())
-                using (FileStream output = new FileStream(path, FileMode.CreateNew,
-                    FileAccess.Write, FileShare.None))
-                {
-                    owned.Save(output);
-                    output.Flush(true);
-                }
-            }
-            finally
-            {
-                DestroyIcon(iconHandle);
-            }
+            foreach (byte[] frame in frames)
+                writer.Write(frame);
+            output.Flush(true);
         }
     }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DestroyIcon(IntPtr iconHandle);
+    private static Bitmap DrawIconFrame(int size, Color accent, string label)
+    {
+        Bitmap bitmap = new Bitmap(size, size,
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                float scale = size / 64f;
+                graphics.Clear(Color.Transparent);
+                graphics.SmoothingMode =
+                    System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                graphics.CompositingQuality =
+                    System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                graphics.PixelOffsetMode =
+                    System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
+                Rectangle monitor = ScaleRectangle(5, 7, 54, 40, scale);
+                using (Brush frame = new SolidBrush(Color.FromArgb(47, 54, 61)))
+                using (Brush screen = new SolidBrush(Color.FromArgb(240, 246, 252)))
+                using (Brush accentBrush = new SolidBrush(accent))
+                using (Pen stand = new Pen(Color.FromArgb(47, 54, 61),
+                    Math.Max(1f, 5f * scale)))
+                {
+                    graphics.FillRoundedRectangle(frame, monitor,
+                        Math.Max(1, (int)Math.Round(7 * scale)));
+                    graphics.FillRectangle(screen,
+                        ScaleRectangle(10, 12, 44, 26, scale));
+                    graphics.FillRectangle(accentBrush,
+                        ScaleRectangle(10, 31, 44, 7, scale));
+                    graphics.DrawLine(stand, 32 * scale, 47 * scale,
+                        32 * scale, 54 * scale);
+                    graphics.DrawLine(stand, 22 * scale, 56 * scale,
+                        42 * scale, 56 * scale);
+                }
+                using (Font labelFont = new Font(FontFamily.GenericSansSerif,
+                    Math.Max(4f, 14f * scale), FontStyle.Bold,
+                    GraphicsUnit.Pixel))
+                {
+                    TextRenderer.DrawText(graphics, label, labelFont,
+                        ScaleRectangle(10, 12, 44, 20, scale), accent,
+                        TextFormatFlags.HorizontalCenter |
+                        TextFormatFlags.VerticalCenter |
+                        TextFormatFlags.NoPadding);
+                }
+            }
+            return bitmap;
+        }
+        catch
+        {
+            bitmap.Dispose();
+            throw;
+        }
+    }
+
+    private static Rectangle ScaleRectangle(int x, int y, int width,
+        int height, float scale)
+    {
+        return new Rectangle(
+            (int)Math.Round(x * scale),
+            (int)Math.Round(y * scale),
+            Math.Max(1, (int)Math.Round(width * scale)),
+            Math.Max(1, (int)Math.Round(height * scale)));
+    }
 
     private static void FillRoundedRectangle(this Graphics graphics, Brush brush,
         Rectangle bounds, int radius)

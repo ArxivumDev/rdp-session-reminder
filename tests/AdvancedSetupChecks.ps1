@@ -314,6 +314,31 @@ try {
     if ((Get-Item -LiteralPath $generatedIconPath).Length -le 128) {
         throw 'The generated shortcut icon is unexpectedly small.'
     }
+    $iconBytes = [IO.File]::ReadAllBytes($generatedIconPath)
+    if ([BitConverter]::ToUInt16($iconBytes, 0) -ne 0 -or
+        [BitConverter]::ToUInt16($iconBytes, 2) -ne 1 -or
+        [BitConverter]::ToUInt16($iconBytes, 4) -ne 9) {
+        throw 'The generated shortcut icon is not a nine-frame Windows ICO.'
+    }
+    $generatedSizes = for ($index = 0; $index -lt 9; $index++) {
+        $dimension = [int]$iconBytes[6 + (16 * $index)]
+        if ($dimension -eq 0) { 256 } else { $dimension }
+    }
+    if (($generatedSizes -join ',') -ne '16,20,24,32,40,48,64,128,256') {
+        throw 'The generated shortcut icon is missing a required shell size.'
+    }
+    $hasExpectedIconFrames = $iconCatalogType.GetMethod(
+        'HasExpectedIconFrames', [Reflection.BindingFlags]'Static,NonPublic')
+    if (-not [bool]$hasExpectedIconFrames.Invoke(
+            $null, @([string]$generatedIconPath))) {
+        throw 'The generated shortcut icon failed catalog validation.'
+    }
+    $invalidIconPath = Join-Path $temporaryDirectory 'invalid-large.ico'
+    [IO.File]::WriteAllBytes($invalidIconPath, [byte[]](0..255))
+    if ([bool]$hasExpectedIconFrames.Invoke(
+            $null, @([string]$invalidIconPath))) {
+        throw 'A large non-ICO file passed shortcut icon validation.'
+    }
     $loadedIcon = [Drawing.Icon]::new($generatedIconPath)
     try {
         if ($loadedIcon.Width -le 0 -or $loadedIcon.Height -le 0) {

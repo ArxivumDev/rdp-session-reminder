@@ -516,7 +516,12 @@ internal static class UninstallerEngine
         "work-v1.ico",
         "production-v1.ico",
         "test-v1.ico",
-        "personal-v1.ico"
+        "personal-v1.ico",
+        "reminder-v2.ico",
+        "work-v2.ico",
+        "production-v2.ico",
+        "test-v2.ico",
+        "personal-v2.ico"
     };
 
     internal static void ValidateUninstallRoots(UninstallLayout layout)
@@ -1233,9 +1238,13 @@ internal static class UninstallerEngine
         string iconsDirectory = layout.IconsDirectory;
         Directory.CreateDirectory(iconsDirectory);
         string generatedIcon = Path.Combine(iconsDirectory,
-            "reminder-v1.ico");
+            "reminder-v2.ico");
         File.WriteAllBytes(generatedIcon,
             new byte[] { 0, 1, 0, 0, 7, 6, 5, 4 });
+        string legacyGeneratedIcon = Path.Combine(iconsDirectory,
+            "work-v1.ico");
+        File.WriteAllBytes(legacyGeneratedIcon,
+            new byte[] { 0, 1, 0, 0, 4, 5, 6, 7 });
         string unknownIcon = Path.Combine(iconsDirectory, "custom.ico");
         byte[] unknownIconBytes = new byte[] { 9, 8, 7, 6, 5 };
         File.WriteAllBytes(unknownIcon, unknownIconBytes);
@@ -1322,6 +1331,7 @@ internal static class UninstallerEngine
             File.Exists(Path.Combine(secondProfile, "settings.ini")) ||
             File.Exists(Path.Combine(secondProfile, "connection.rdp")) ||
             File.Exists(generatedIcon) ||
+            File.Exists(legacyGeneratedIcon) ||
             !BytesEqual(unknownIconBytes, File.ReadAllBytes(unknownIcon)) ||
             Directory.Exists(firstOneTime) ||
             File.Exists(Path.Combine(secondOneTime, "settings.ini")) ||
@@ -1369,7 +1379,7 @@ internal static class UninstallerEngine
         File.WriteAllText(Path.Combine(profile, "connection.rdp"), "clean");
         Directory.CreateDirectory(layout.IconsDirectory);
         File.WriteAllBytes(Path.Combine(layout.IconsDirectory,
-            "personal-v1.ico"), new byte[] { 0, 1, 0, 0, 3, 2, 1 });
+            "personal-v2.ico"), new byte[] { 0, 1, 0, 0, 3, 2, 1 });
         const string oneTimeId = "88888888888888888888888888888888";
         string oneTimeProfile = Path.Combine(
             layout.OneTimeProfilesDirectory, oneTimeId);
