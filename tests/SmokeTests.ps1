@@ -23,7 +23,7 @@ foreach ($executable in $executables) {
     }
 
     $version = (Get-Item -LiteralPath $executable).VersionInfo.FileVersion
-    if ($version -ne '1.0.0.0') {
+    if ($version -ne '1.0.1.0') {
         throw "Unexpected file version for $([IO.Path]::GetFileName($executable)): $version"
     }
 }

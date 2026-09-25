@@ -12,8 +12,8 @@ using System.Threading;
 [assembly: AssemblyCompany("RDP Session Reminder contributors")]
 [assembly: AssemblyProduct("RDP Session Reminder")]
 [assembly: AssemblyCopyright("Copyright (c) 2026")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 internal static class RdpSessionReminder
 {
@@ -89,18 +89,64 @@ internal static class RdpSessionReminder
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct ProcessEntry
+    private struct StartupInfo
     {
-        public uint Size;
-        public uint Usage;
+        public int Size;
+        public string Reserved;
+        public string Desktop;
+        public string Title;
+        public int X;
+        public int Y;
+        public int XSize;
+        public int YSize;
+        public int XCountChars;
+        public int YCountChars;
+        public int FillAttribute;
+        public int Flags;
+        public short ShowWindow;
+        public short Reserved2Bytes;
+        public IntPtr Reserved2;
+        public IntPtr StandardInput;
+        public IntPtr StandardOutput;
+        public IntPtr StandardError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr Process;
+        public IntPtr Thread;
         public uint ProcessId;
-        public IntPtr DefaultHeapId;
-        public uint ModuleId;
-        public uint Threads;
-        public uint ParentProcessId;
-        public int PriorityBase;
-        public uint Flags;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string ExecutableFile;
+        public uint ThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobBasicAccountingInformation
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
+    }
+
+    private sealed class RdpWindowCandidate
+    {
+        public IntPtr Window;
+        public uint ProcessId;
+        public IntPtr ProcessHandle;
+    }
+
+    private enum LifecycleDecision
+    {
+        Wait,
+        Attach,
+        KeepVisible,
+        HideAndWait,
+        Stop
     }
 
     [DllImport("user32.dll")]
@@ -161,6 +207,10 @@ internal static class RdpSessionReminder
     private static extern bool ShowWindow(IntPtr hWnd, int command);
 
     [DllImport("user32.dll")]
+    private static extern bool InvalidateRect(
+        IntPtr hWnd, IntPtr rectangle, bool erase);
+
+    [DllImport("user32.dll")]
     private static extern bool EnumDisplayMonitors(IntPtr deviceContext,
         IntPtr clipRectangle, MonitorEnumProc callback, IntPtr parameter);
 
@@ -217,16 +267,51 @@ internal static class RdpSessionReminder
     private static extern IntPtr GetModuleHandle(string moduleName);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+    private static extern bool CloseHandle(IntPtr handle);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry entry);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry entry);
+    private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr handle);
+    private static extern bool AssignProcessToJobObject(
+        IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsProcessInJob(
+        IntPtr process, IntPtr job, out bool result);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryInformationJobObject(
+        IntPtr job, int informationClass,
+        ref JobBasicAccountingInformation information,
+        uint informationLength, IntPtr returnLength);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+        ExactSpelling = true, SetLastError = true)]
+    private static extern bool CreateProcessW(
+        string applicationName, StringBuilder commandLine,
+        IntPtr processAttributes, IntPtr threadAttributes,
+        bool inheritHandles, uint creationFlags, IntPtr environment,
+        string currentDirectory, ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr thread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(
+        uint desiredAccess, bool inheritHandle, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(
+        IntPtr process, uint flags, StringBuilder executableName,
+        ref uint size);
 
     [DllImport("user32.dll")]
     private static extern IntPtr LoadCursor(IntPtr instance, IntPtr cursorName);
@@ -241,6 +326,10 @@ internal static class RdpSessionReminder
     [DllImport("user32.dll")]
     private static extern uint GetDpiForSystem();
 
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(
+        IntPtr monitor, int dpiType, out uint dpiX, out uint dpiY);
+
     private const uint WindowStylePopup = 0x80000000;
     private const uint ExStyleTopmost = 0x00000008;
     private const uint ExStyleTransparent = 0x00000020;
@@ -254,6 +343,7 @@ internal static class RdpSessionReminder
     private const uint MessageNcHitTest = 0x0084;
     private const uint MessageDisplayChange = 0x007E;
     private const uint MessageTimer = 0x0113;
+    private const uint MessageDpiChanged = 0x02E0;
     private const uint LayeredAlpha = 0x00000002;
     private const uint SetPositionNoActivate = 0x0010;
     private const uint SetPositionShowWindow = 0x0040;
@@ -263,7 +353,13 @@ internal static class RdpSessionReminder
     private const uint DrawSingleLine = 0x00000020;
     private const uint DrawNoPrefix = 0x00000800;
     private const uint DrawEndEllipsis = 0x00008000;
-    private const uint SnapshotProcesses = 0x00000002;
+    private const uint CreateSuspended = 0x00000004;
+    private const uint ProcessQueryLimitedInformation = 0x00001000;
+    private const uint Synchronize = 0x00100000;
+    private const uint WaitTimeout = 0x00000102;
+    private const uint ResumeThreadFailed = 0xFFFFFFFF;
+    private const int JobObjectBasicAccountingInformation = 1;
+    private const int MonitorDpiEffective = 0;
     private const int ShowWindowHide = 0;
     private const int TransparentBackground = 1;
     private const int FontWeightSemibold = 600;
@@ -271,12 +367,11 @@ internal static class RdpSessionReminder
     private static readonly UIntPtr MonitorTimer = new UIntPtr(1);
     private static readonly WindowProc WindowProcedure = HandleWindowMessage;
 
-    private static int preferredProcessId;
-    private static long preferredProcessStartTicks;
+    private static IntPtr jobHandle;
+    private static IntPtr rootProcessHandle;
+    private static IntPtr selectedProcessHandle;
+    private static string canonicalMstscPath;
     private static int establishedProcessId;
-    private static long establishedProcessStartTicks;
-    private static long minimumNewProcessStartTicks;
-    private static DateTime startupDeadlineUtc;
     private static IntPtr targetWindow;
     private static IntPtr bannerWindow;
     private static IntPtr bannerFont;
@@ -286,9 +381,12 @@ internal static class RdpSessionReminder
     private static int missingTicks;
     private static int bannerWidth;
     private static int bannerHeight;
+    private static int bannerLogicalWidth;
+    private static uint bannerDpi;
     private static int rightMargin;
     private static int bottomLift;
     private static Mutex instanceMutex;
+    private static bool mutexAcquired;
 
     [STAThread]
     private static int Main(string[] args)
@@ -325,12 +423,42 @@ internal static class RdpSessionReminder
                 "Run setup to create a new shortcut.");
             return 1;
         }
-
-        bool ownsMutex;
-        string mutexName = "Local\\RdpSessionReminder-" + profileId.ToUpperInvariant();
-        instanceMutex = new Mutex(true, mutexName, out ownsMutex);
-        if (!ownsMutex)
+        if (!string.IsNullOrEmpty(settings.RdpFile))
         {
+            settings.RdpFile = AppPaths.GetProfileConnectionPath(profileId);
+            RefreshTargetFromRdpFile(settings);
+        }
+
+        string mutexName = "Local\\RdpSessionReminder-" + profileId.ToUpperInvariant();
+        mutexAcquired = false;
+        try
+        {
+            instanceMutex = new Mutex(false, mutexName);
+            try
+            {
+                mutexAcquired = instanceMutex.WaitOne(0);
+            }
+            catch (AbandonedMutexException)
+            {
+                mutexAcquired = true;
+            }
+        }
+        catch (Exception exception)
+        {
+            if (instanceMutex != null)
+            {
+                instanceMutex.Dispose();
+                instanceMutex = null;
+            }
+            ShowError("The reminder could not reserve this shortcut profile.\r\n\r\n" +
+                exception.Message);
+            return 1;
+        }
+
+        if (!mutexAcquired)
+        {
+            instanceMutex.Dispose();
+            instanceMutex = null;
             MessageBox(IntPtr.Zero,
                 "This Remote Desktop shortcut is already running.",
                 AppPaths.ProductName, 0x00000040);
@@ -343,8 +471,22 @@ internal static class RdpSessionReminder
         }
         finally
         {
-            instanceMutex.ReleaseMutex();
-            instanceMutex.Dispose();
+            if (mutexAcquired && instanceMutex != null)
+            {
+                try
+                {
+                    instanceMutex.ReleaseMutex();
+                }
+                catch
+                {
+                }
+            }
+            mutexAcquired = false;
+            if (instanceMutex != null)
+            {
+                instanceMutex.Dispose();
+                instanceMutex = null;
+            }
         }
     }
 
@@ -352,49 +494,33 @@ internal static class RdpSessionReminder
     {
         try
         {
-            SetProcessDpiAwarenessContext(new IntPtr(-4));
-        }
-        catch
-        {
-        }
+            try
+            {
+                SetProcessDpiAwarenessContext(new IntPtr(-4));
+            }
+            catch
+            {
+            }
 
-        uint dpi = 96;
-        try
-        {
-            dpi = GetDpiForSystem();
-            if (dpi == 0)
-                dpi = 96;
-        }
-        catch
-        {
-            dpi = 96;
-        }
+            jobHandle = IntPtr.Zero;
+            rootProcessHandle = IntPtr.Zero;
+            selectedProcessHandle = IntPtr.Zero;
+            establishedProcessId = 0;
+            targetWindow = IntPtr.Zero;
+            bannerWindow = IntPtr.Zero;
+            bannerFont = IntPtr.Zero;
+            targetSeen = false;
+            missingTicks = 0;
+            bannerText = SettingsStore.NormalizeReminderText(
+                settings.ReminderText, settings.ComputerName);
+            bannerLogicalWidth = Math.Max(350,
+                Math.Min(650, 120 + bannerText.Length * 8));
+            displayDevice = settings.DisplayDevice ?? "";
+            ApplyBannerDpi(GetSelectedDisplayDpi());
+            canonicalMstscPath = CanonicalizePath(
+                Path.Combine(Environment.SystemDirectory, "mstsc.exe"));
 
-        bannerText = SettingsStore.NormalizeReminderText(
-            settings.ReminderText, settings.ComputerName);
-        int logicalWidth = Math.Max(350, Math.Min(650, 120 + bannerText.Length * 8));
-        bannerWidth = Scale(logicalWidth, dpi);
-        bannerHeight = Scale(34, dpi);
-        rightMargin = Scale(20, dpi);
-        bottomLift = Scale(64, dpi);
-        displayDevice = settings.DisplayDevice ?? "";
-
-        preferredProcessId = 0;
-        preferredProcessStartTicks = 0;
-        establishedProcessId = 0;
-        establishedProcessStartTicks = 0;
-        targetWindow = IntPtr.Zero;
-        targetSeen = false;
-        missingTicks = 0;
-        DateTime launchStartedUtc = DateTime.UtcNow;
-        minimumNewProcessStartTicks = launchStartedUtc.AddSeconds(-10).Ticks;
-        startupDeadlineUtc = launchStartedUtc.AddMinutes(5);
-
-        string mstscPath = Path.Combine(Environment.SystemDirectory, "mstsc.exe");
-        try
-        {
-            ProcessStartInfo startInfo = new ProcessStartInfo();
-            startInfo.FileName = mstscPath;
+            string launchArguments;
             if (!string.IsNullOrEmpty(settings.RdpFile))
             {
                 if (!File.Exists(settings.RdpFile))
@@ -403,68 +529,104 @@ internal static class RdpSessionReminder
                         "missing. Run setup to create a new shortcut.");
                     return 1;
                 }
-                startInfo.Arguments = "\"" + settings.RdpFile + "\"";
+                launchArguments = QuoteCommandLineArgument(settings.RdpFile);
             }
             else
             {
-                startInfo.Arguments = "/v:" + settings.ComputerName +
-                    (settings.FullScreen ? " /f" : "");
+                launchArguments = BuildDirectArguments(settings);
             }
-            startInfo.UseShellExecute = true;
-            using (Process launchedProcess = Process.Start(startInfo))
+
+            string launchError;
+            if (!LaunchMstscInPrivateJob(launchArguments, out launchError))
             {
-                if (launchedProcess == null)
-                    throw new InvalidOperationException(
-                        "Windows did not return a Remote Desktop process.");
-                preferredProcessId = launchedProcess.Id;
-                TryGetProcessStartTicks(
-                    preferredProcessId, out preferredProcessStartTicks);
+                ShowError("Remote Desktop could not be started.\r\n\r\n" +
+                    launchError);
+                return 1;
             }
+
+            IntPtr instance = GetModuleHandle(null);
+            string className = "RdpSessionReminderBannerWindow";
+            WindowClass windowClass = new WindowClass();
+            windowClass.Size = (uint)Marshal.SizeOf(typeof(WindowClass));
+            windowClass.WindowProcedure =
+                Marshal.GetFunctionPointerForDelegate(WindowProcedure);
+            windowClass.Instance = instance;
+            windowClass.Cursor = LoadCursor(IntPtr.Zero, new IntPtr(32512));
+            windowClass.ClassName = className;
+            if (RegisterClassEx(ref windowClass) == 0)
+            {
+                ShowError("The reminder window could not be initialized.");
+                return 1;
+            }
+
+            uint extendedStyle = ExStyleTopmost | ExStyleTransparent |
+                ExStyleToolWindow | ExStyleLayered | ExStyleNoActivate;
+            bannerWindow = CreateWindowEx(extendedStyle, className,
+                AppPaths.ProductName, WindowStylePopup, 0, 0,
+                bannerWidth, bannerHeight, IntPtr.Zero, IntPtr.Zero,
+                instance, IntPtr.Zero);
+            if (bannerWindow == IntPtr.Zero)
+            {
+                ShowError("The reminder window could not be created.");
+                return 1;
+            }
+
+            RecreateBannerFont();
+            SetLayeredWindowAttributes(bannerWindow, 0, 247, LayeredAlpha);
+            if (SetTimer(bannerWindow, MonitorTimer, 1000, IntPtr.Zero) ==
+                UIntPtr.Zero)
+            {
+                ShowError("The reminder monitor could not be initialized.");
+                return 1;
+            }
+            MonitorRemoteSession();
+
+            NativeMessage message;
+            while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0)
+            {
+                TranslateMessage(ref message);
+                DispatchMessage(ref message);
+            }
+            return 0;
         }
         catch (Exception exception)
         {
-            ShowError("Remote Desktop could not be started.\r\n\r\n" + exception.Message);
+            ShowError("The reminder stopped because of an unexpected error.\r\n\r\n" +
+                exception.Message);
             return 1;
         }
-
-        IntPtr instance = GetModuleHandle(null);
-        string className = "RdpSessionReminderBannerWindow";
-        WindowClass windowClass = new WindowClass();
-        windowClass.Size = (uint)Marshal.SizeOf(typeof(WindowClass));
-        windowClass.WindowProcedure = Marshal.GetFunctionPointerForDelegate(WindowProcedure);
-        windowClass.Instance = instance;
-        windowClass.Cursor = LoadCursor(IntPtr.Zero, new IntPtr(32512));
-        windowClass.ClassName = className;
-        if (RegisterClassEx(ref windowClass) == 0)
+        finally
         {
-            ShowError("The reminder window could not be initialized.");
-            return 1;
+            CleanupRuntimeResources();
         }
+    }
 
-        uint extendedStyle = ExStyleTopmost | ExStyleTransparent |
-            ExStyleToolWindow | ExStyleLayered | ExStyleNoActivate;
-        bannerWindow = CreateWindowEx(extendedStyle, className, AppPaths.ProductName,
-            WindowStylePopup, 0, 0, bannerWidth, bannerHeight,
-            IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
-        if (bannerWindow == IntPtr.Zero)
-        {
-            ShowError("The reminder window could not be created.");
-            return 1;
-        }
+    private static string BuildDirectArguments(ReminderSettings settings)
+    {
+        if (settings == null ||
+            !SettingsStore.IsValidComputerName(settings.ComputerName))
+            throw new ArgumentException("A valid Remote Desktop target is required.");
+        return "/v:" + SettingsStore.NormalizeComputerName(settings.ComputerName) +
+            (settings.FullScreen ? " /f" : "");
+    }
 
-        bannerFont = CreateFont(-Scale(17, dpi), 0, 0, 0, FontWeightSemibold,
-            0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI Semibold");
-        SetLayeredWindowAttributes(bannerWindow, 0, 247, LayeredAlpha);
-        SetTimer(bannerWindow, MonitorTimer, 1000, IntPtr.Zero);
-        MonitorRemoteSession();
+    private static void RefreshTargetFromRdpFile(ReminderSettings settings)
+    {
+        if (settings == null || string.IsNullOrEmpty(settings.RdpFile))
+            return;
 
-        NativeMessage message;
-        while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0)
-        {
-            TranslateMessage(ref message);
-            DispatchMessage(ref message);
-        }
-        return 0;
+        string target = SettingsStore.NormalizeComputerName(
+            RdpFileTargetReader.TryReadTarget(settings.RdpFile));
+        if (!SettingsStore.IsValidComputerName(target))
+            return;
+
+        string oldDefault = SettingsStore.NormalizeReminderText(
+            "", settings.ComputerName);
+        bool usesAutomaticReminder = string.Equals(
+            settings.ReminderText, oldDefault, StringComparison.Ordinal);
+        settings.ComputerName = target;
+        if (usesAutomaticReminder)
+            settings.ReminderText = SettingsStore.NormalizeReminderText("", target);
     }
 
     private static IntPtr HandleWindowMessage(
@@ -484,8 +646,18 @@ internal static class RdpSessionReminder
                 return IntPtr.Zero;
             }
 
+            if (message == MessageDpiChanged)
+            {
+                uint dpi = (uint)(wParam.ToInt64() & 0xFFFF);
+                ApplyBannerDpi(dpi);
+                if (targetSeen)
+                    PositionAndShowBanner();
+                return IntPtr.Zero;
+            }
+
             if (message == MessageDisplayChange || message == MessageSettingChange)
             {
+                ApplyBannerDpi(GetSelectedDisplayDpi());
                 if (targetSeen)
                     PositionAndShowBanner();
             }
@@ -503,6 +675,8 @@ internal static class RdpSessionReminder
                     DeleteObject(bannerFont);
                     bannerFont = IntPtr.Zero;
                 }
+                if (hWnd == bannerWindow)
+                    bannerWindow = IntPtr.Zero;
                 PostQuitMessage(0);
                 return IntPtr.Zero;
             }
@@ -519,59 +693,105 @@ internal static class RdpSessionReminder
     {
         if (targetSeen)
         {
-            if (IsEstablishedSessionWindow(targetWindow))
+            bool processAlive = IsProcessHandleLive(selectedProcessHandle);
+            bool currentWindowValid = processAlive &&
+                IsPinnedSessionWindow(targetWindow);
+            IntPtr replacement = IntPtr.Zero;
+            if (processAlive && !currentWindowValid)
+                replacement = FindRdpSessionWindowForPinnedProcess();
+
+            int nextMissingTicks = currentWindowValid ||
+                replacement != IntPtr.Zero ? 0 : missingTicks + 1;
+            LifecycleDecision decision = DecideAttachedLifecycle(
+                processAlive, currentWindowValid,
+                replacement != IntPtr.Zero, nextMissingTicks);
+
+            if (decision == LifecycleDecision.Stop)
             {
-                missingTicks = 0;
-                PositionAndShowBanner();
+                DestroyWindow(bannerWindow);
                 return;
             }
 
-            IntPtr replacement = FindRdpSessionWindowForProcess(
-                establishedProcessId, establishedProcessStartTicks);
-            if (replacement != IntPtr.Zero)
+            if (decision == LifecycleDecision.KeepVisible)
             {
-                targetWindow = replacement;
+                if (replacement != IntPtr.Zero)
+                    targetWindow = replacement;
                 missingTicks = 0;
                 PositionAndShowBanner();
                 return;
             }
 
             ShowWindow(bannerWindow, ShowWindowHide);
-            missingTicks++;
-            if (ShouldCloseReminder(true, missingTicks,
-                    DateTime.UtcNow, startupDeadlineUtc))
-                DestroyWindow(bannerWindow);
+            missingTicks = nextMissingTicks;
             return;
         }
 
-        IntPtr initialWindow = FindInitialRdpSessionWindow(
-            preferredProcessId, preferredProcessStartTicks,
-            minimumNewProcessStartTicks);
-        if (initialWindow != IntPtr.Zero)
+        uint activeProcesses;
+        if (!TryGetActiveJobProcessCount(out activeProcesses))
         {
-            uint processId;
-            long processStartTicks;
-            if (IsRdpSessionWindow(initialWindow, out processId) &&
-                TryGetProcessStartTicks((int)processId, out processStartTicks))
-            {
-                targetWindow = initialWindow;
-                establishedProcessId = (int)processId;
-                establishedProcessStartTicks = processStartTicks;
-                targetSeen = true;
-                missingTicks = 0;
-                PositionAndShowBanner();
-                return;
-            }
+            DestroyWindow(bannerWindow);
+            return;
+        }
+        if (DecideInitialLifecycle(activeProcesses, 0) ==
+            LifecycleDecision.Stop)
+        {
+            DestroyWindow(bannerWindow);
+            return;
         }
 
-        if (ShouldCloseReminder(false, 0, DateTime.UtcNow, startupDeadlineUtc))
-            DestroyWindow(bannerWindow);
+        List<RdpWindowCandidate> candidates = FindInitialRdpSessionCandidates();
+        try
+        {
+            LifecycleDecision decision = DecideInitialLifecycle(
+                activeProcesses, candidates.Count);
+            if (decision == LifecycleDecision.Stop)
+            {
+                DestroyWindow(bannerWindow);
+                return;
+            }
+
+            if (decision != LifecycleDecision.Attach)
+                return;
+
+            RdpWindowCandidate candidate = candidates[0];
+            if (!IsCandidateStillValid(candidate))
+                return;
+
+            targetWindow = candidate.Window;
+            establishedProcessId = (int)candidate.ProcessId;
+            selectedProcessHandle = candidate.ProcessHandle;
+            candidate.ProcessHandle = IntPtr.Zero;
+            targetSeen = true;
+            missingTicks = 0;
+            PositionAndShowBanner();
+        }
+        finally
+        {
+            CloseCandidates(candidates);
+        }
     }
 
-    private static bool ShouldCloseReminder(bool sessionWasSeen, int lostTicks,
-        DateTime currentUtc, DateTime deadlineUtc)
+    private static LifecycleDecision DecideInitialLifecycle(
+        uint activeProcesses, int candidateCount)
     {
-        return sessionWasSeen ? lostTicks >= 5 : currentUtc >= deadlineUtc;
+        if (activeProcesses == 0)
+            return LifecycleDecision.Stop;
+        return candidateCount == 1
+            ? LifecycleDecision.Attach
+            : LifecycleDecision.Wait;
+    }
+
+    private static LifecycleDecision DecideAttachedLifecycle(
+        bool processAlive, bool currentWindowValid,
+        bool replacementFound, int missingWindowTicks)
+    {
+        if (!processAlive)
+            return LifecycleDecision.Stop;
+        if (currentWindowValid || replacementFound)
+            return LifecycleDecision.KeepVisible;
+        return missingWindowTicks >= 5
+            ? LifecycleDecision.Stop
+            : LifecycleDecision.HideAndWait;
     }
 
     private static void PositionAndShowBanner()
@@ -595,7 +815,21 @@ internal static class RdpSessionReminder
     private static bool TryGetSelectedWorkArea(out NativeRect workArea)
     {
         workArea = new NativeRect();
-        IntPtr selectedMonitor = IntPtr.Zero;
+        IntPtr selectedMonitor;
+        MonitorInfo selectedInformation;
+        if (!TryGetSelectedMonitor(out selectedMonitor, out selectedInformation))
+            return false;
+
+        workArea = selectedInformation.WorkArea;
+        return true;
+    }
+
+    private static bool TryGetSelectedMonitor(
+        out IntPtr selectedMonitor, out MonitorInfo selectedInformation)
+    {
+        selectedMonitor = IntPtr.Zero;
+        selectedInformation = new MonitorInfo();
+        IntPtr foundMonitor = IntPtr.Zero;
 
         if (!string.IsNullOrEmpty(displayDevice))
         {
@@ -608,28 +842,82 @@ internal static class RdpSessionReminder
                         string.Equals(information.DeviceName, displayDevice,
                             StringComparison.OrdinalIgnoreCase))
                     {
-                        selectedMonitor = monitor;
+                        foundMonitor = monitor;
                         return false;
                     }
                     return true;
                 }, IntPtr.Zero);
         }
 
-        if (selectedMonitor == IntPtr.Zero)
+        if (foundMonitor == IntPtr.Zero)
         {
             NativePoint origin = new NativePoint();
-            selectedMonitor = MonitorFromPoint(origin, 1);
+            foundMonitor = MonitorFromPoint(origin, 1);
         }
-        if (selectedMonitor == IntPtr.Zero)
+        if (foundMonitor == IntPtr.Zero)
             return false;
 
-        MonitorInfo selectedInformation = new MonitorInfo();
+        selectedMonitor = foundMonitor;
         selectedInformation.Size = (uint)Marshal.SizeOf(typeof(MonitorInfo));
         if (!GetMonitorInfo(selectedMonitor, ref selectedInformation))
             return false;
-
-        workArea = selectedInformation.WorkArea;
         return true;
+    }
+
+    private static uint GetSelectedDisplayDpi()
+    {
+        try
+        {
+            IntPtr monitor;
+            MonitorInfo information;
+            uint dpiX;
+            uint dpiY;
+            if (TryGetSelectedMonitor(out monitor, out information) &&
+                GetDpiForMonitor(monitor, MonitorDpiEffective,
+                    out dpiX, out dpiY) == 0 && dpiX > 0)
+                return dpiX;
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            uint systemDpi = GetDpiForSystem();
+            return systemDpi == 0 ? 96 : systemDpi;
+        }
+        catch
+        {
+            return 96;
+        }
+    }
+
+    private static void ApplyBannerDpi(uint dpi)
+    {
+        bannerDpi = dpi == 0 ? 96 : dpi;
+        bannerWidth = Scale(bannerLogicalWidth, bannerDpi);
+        bannerHeight = Scale(34, bannerDpi);
+        rightMargin = Scale(20, bannerDpi);
+        bottomLift = Scale(64, bannerDpi);
+        if (bannerWindow != IntPtr.Zero)
+        {
+            RecreateBannerFont();
+            InvalidateRect(bannerWindow, IntPtr.Zero, true);
+        }
+    }
+
+    private static void RecreateBannerFont()
+    {
+        IntPtr newFont = CreateFont(-Scale(17, bannerDpi), 0, 0, 0,
+            FontWeightSemibold, 0, 0, 0, 1, 0, 0, 5, 0,
+            "Segoe UI Semibold");
+        if (newFont == IntPtr.Zero)
+            return;
+
+        IntPtr oldFont = bannerFont;
+        bannerFont = newFont;
+        if (oldFont != IntPtr.Zero)
+            DeleteObject(oldFont);
     }
 
     private static void PaintBanner(IntPtr hWnd)
@@ -661,107 +949,95 @@ internal static class RdpSessionReminder
         EndPaint(hWnd, ref paint);
     }
 
-    private static IntPtr FindInitialRdpSessionWindow(
-        int launchedProcessId, long launchedStartTicks, long earliestStartTicks)
+    private static List<RdpWindowCandidate> FindInitialRdpSessionCandidates()
     {
-        IntPtr exact = IntPtr.Zero;
-        List<IntPtr> related = new List<IntPtr>();
-        Dictionary<int, int> processParents = GetProcessParents();
+        List<RdpWindowCandidate> candidates = new List<RdpWindowCandidate>();
         EnumWindows(delegate(IntPtr hWnd, IntPtr parameter)
         {
             uint processId;
-            if (!IsRdpSessionWindow(hWnd, out processId))
+            if (!TryGetRdpWindowProcessId(hWnd, out processId))
                 return true;
 
-            long processStartTicks;
-            if (!TryGetProcessStartTicks((int)processId, out processStartTicks))
+            IntPtr processHandle = OpenProcess(
+                ProcessQueryLimitedInformation | Synchronize,
+                false, processId);
+            if (processHandle == IntPtr.Zero)
                 return true;
 
-            if (launchedStartTicks > 0 &&
-                processId == (uint)launchedProcessId &&
-                processStartTicks == launchedStartTicks)
+            bool keepHandle = false;
+            try
             {
-                exact = hWnd;
-                return false;
-            }
+                uint recheckedProcessId;
+                bool inJob;
+                if (!TryGetRdpWindowProcessId(hWnd, out recheckedProcessId) ||
+                    recheckedProcessId != processId ||
+                    !IsProcessHandleLive(processHandle) ||
+                    !IsExpectedMstscProcess(processHandle) ||
+                    !IsProcessInJob(processHandle, jobHandle, out inJob) ||
+                    !inJob)
+                    return true;
 
-            if (processStartTicks < earliestStartTicks ||
-                !IsDescendantProcess(
-                    (int)processId, launchedProcessId, processParents))
+                RdpWindowCandidate candidate = new RdpWindowCandidate();
+                candidate.Window = hWnd;
+                candidate.ProcessId = processId;
+                candidate.ProcessHandle = processHandle;
+                candidates.Add(candidate);
+                keepHandle = true;
                 return true;
-
-            related.Add(hWnd);
-            return true;
+            }
+            finally
+            {
+                if (!keepHandle)
+                    CloseHandle(processHandle);
+            }
         }, IntPtr.Zero);
-
-        if (exact != IntPtr.Zero)
-            return exact;
-        return related.Count == 1 ? related[0] : IntPtr.Zero;
+        return candidates;
     }
 
-    private static Dictionary<int, int> GetProcessParents()
+    private static bool IsCandidateStillValid(RdpWindowCandidate candidate)
     {
-        Dictionary<int, int> parents = new Dictionary<int, int>();
-        IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
-        if (snapshot == new IntPtr(-1))
-            return parents;
-
-        try
-        {
-            ProcessEntry entry = new ProcessEntry();
-            entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
-            if (!Process32First(snapshot, ref entry))
-                return parents;
-
-            do
-            {
-                parents[(int)entry.ProcessId] = (int)entry.ParentProcessId;
-                entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
-            }
-            while (Process32Next(snapshot, ref entry));
-        }
-        finally
-        {
-            CloseHandle(snapshot);
-        }
-        return parents;
-    }
-
-    private static bool IsDescendantProcess(
-        int candidateId, int ancestorId, Dictionary<int, int> parents)
-    {
-        if (candidateId <= 0 || ancestorId <= 0 || candidateId == ancestorId)
+        if (candidate == null || candidate.ProcessHandle == IntPtr.Zero ||
+            !IsProcessHandleLive(candidate.ProcessHandle) ||
+            !IsExpectedMstscProcess(candidate.ProcessHandle))
             return false;
 
-        int current = candidateId;
-        HashSet<int> visited = new HashSet<int>();
-        for (int depth = 0; depth < 16 && visited.Add(current); depth++)
-        {
-            int parent;
-            if (!parents.TryGetValue(current, out parent) || parent <= 0)
-                return false;
-            if (parent == ancestorId)
-                return true;
-            current = parent;
-        }
-        return false;
+        bool inJob;
+        if (!IsProcessInJob(candidate.ProcessHandle, jobHandle, out inJob) ||
+            !inJob)
+            return false;
+
+        uint recheckedProcessId;
+        return TryGetRdpWindowProcessId(candidate.Window,
+            out recheckedProcessId) &&
+            recheckedProcessId == candidate.ProcessId;
     }
 
-    private static IntPtr FindRdpSessionWindowForProcess(
-        int processId, long processStartTicks)
+    private static void CloseCandidates(List<RdpWindowCandidate> candidates)
+    {
+        if (candidates == null)
+            return;
+        foreach (RdpWindowCandidate candidate in candidates)
+        {
+            if (candidate != null && candidate.ProcessHandle != IntPtr.Zero)
+            {
+                CloseHandle(candidate.ProcessHandle);
+                candidate.ProcessHandle = IntPtr.Zero;
+            }
+        }
+    }
+
+    private static IntPtr FindRdpSessionWindowForPinnedProcess()
     {
         IntPtr result = IntPtr.Zero;
-        if (processId <= 0 || processStartTicks <= 0)
+        if (establishedProcessId <= 0 ||
+            !IsProcessHandleLive(selectedProcessHandle))
             return result;
 
         EnumWindows(delegate(IntPtr hWnd, IntPtr parameter)
         {
             uint candidateProcessId;
-            long candidateStartTicks;
-            if (IsRdpSessionWindow(hWnd, out candidateProcessId) &&
-                candidateProcessId == (uint)processId &&
-                TryGetProcessStartTicks(processId, out candidateStartTicks) &&
-                candidateStartTicks == processStartTicks)
+            if (TryGetRdpWindowProcessId(hWnd, out candidateProcessId) &&
+                candidateProcessId == (uint)establishedProcessId)
             {
                 result = hWnd;
                 return false;
@@ -771,40 +1047,55 @@ internal static class RdpSessionReminder
         return result;
     }
 
-    private static bool IsEstablishedSessionWindow(IntPtr hWnd)
+    private static bool IsPinnedSessionWindow(IntPtr hWnd)
     {
+        if (hWnd == IntPtr.Zero ||
+            !IsProcessHandleLive(selectedProcessHandle))
+            return false;
         uint processId;
-        long processStartTicks;
-        return hWnd != IntPtr.Zero &&
-            IsRdpSessionWindow(hWnd, out processId) &&
-            processId == (uint)establishedProcessId &&
-            TryGetProcessStartTicks(establishedProcessId, out processStartTicks) &&
-            processStartTicks == establishedProcessStartTicks;
+        return TryGetRdpWindowProcessId(hWnd, out processId) &&
+            processId == (uint)establishedProcessId;
     }
 
-    private static bool IsRdpSessionWindow(IntPtr hWnd, out uint processId)
+    private static bool TryGetRdpWindowProcessId(
+        IntPtr hWnd, out uint processId)
     {
         processId = 0;
         if (!IsWindow(hWnd) || !IsWindowVisible(hWnd))
             return false;
 
         StringBuilder className = new StringBuilder(128);
-        GetClassName(hWnd, className, className.Capacity);
-        if (!string.Equals(className.ToString(), "TscShellContainerClass",
-            StringComparison.Ordinal))
+        if (GetClassName(hWnd, className, className.Capacity) == 0 ||
+            !string.Equals(className.ToString(), "TscShellContainerClass",
+                StringComparison.Ordinal))
             return false;
 
         GetWindowThreadProcessId(hWnd, out processId);
-        if (processId == 0)
+        return processId != 0;
+    }
+
+    private static bool IsProcessHandleLive(IntPtr processHandle)
+    {
+        return processHandle != IntPtr.Zero &&
+            WaitForSingleObject(processHandle, 0) == WaitTimeout;
+    }
+
+    private static bool IsExpectedMstscProcess(IntPtr processHandle)
+    {
+        if (processHandle == IntPtr.Zero ||
+            string.IsNullOrEmpty(canonicalMstscPath))
+            return false;
+
+        uint capacity = 32768;
+        StringBuilder executablePath = new StringBuilder((int)capacity);
+        if (!QueryFullProcessImageName(processHandle, 0,
+                executablePath, ref capacity))
             return false;
 
         try
         {
-            using (Process process = Process.GetProcessById((int)processId))
-            {
-                return string.Equals(process.ProcessName, "mstsc",
-                    StringComparison.OrdinalIgnoreCase);
-            }
+            return string.Equals(CanonicalizePath(executablePath.ToString()),
+                canonicalMstscPath, StringComparison.OrdinalIgnoreCase);
         }
         catch
         {
@@ -812,25 +1103,167 @@ internal static class RdpSessionReminder
         }
     }
 
-    private static bool TryGetProcessStartTicks(int processId, out long startTicks)
+    private static bool TryGetActiveJobProcessCount(out uint activeProcesses)
     {
-        startTicks = 0;
+        activeProcesses = 0;
+        if (jobHandle == IntPtr.Zero)
+            return false;
+        JobBasicAccountingInformation information =
+            new JobBasicAccountingInformation();
+        if (!QueryInformationJobObject(jobHandle,
+                JobObjectBasicAccountingInformation, ref information,
+                (uint)Marshal.SizeOf(typeof(JobBasicAccountingInformation)),
+                IntPtr.Zero))
+            return false;
+        activeProcesses = information.ActiveProcesses;
+        return true;
+    }
+
+    private static bool LaunchMstscInPrivateJob(
+        string arguments, out string error)
+    {
+        error = "";
+        IntPtr newJob = IntPtr.Zero;
+        ProcessInformation processInformation = new ProcessInformation();
+        bool processCreated = false;
+        bool launchSucceeded = false;
         try
         {
-            using (Process process = Process.GetProcessById(processId))
+            newJob = CreateJobObject(IntPtr.Zero, null);
+            if (newJob == IntPtr.Zero)
             {
-                if (process.HasExited ||
-                    !string.Equals(process.ProcessName, "mstsc",
-                        StringComparison.OrdinalIgnoreCase))
-                    return false;
-                startTicks = process.StartTime.ToUniversalTime().Ticks;
-                return true;
+                error = LastWin32Error("Windows could not create the process group");
+                return false;
             }
+
+            StartupInfo startupInfo = new StartupInfo();
+            startupInfo.Size = Marshal.SizeOf(typeof(StartupInfo));
+            string command = QuoteCommandLineArgument(canonicalMstscPath);
+            if (!string.IsNullOrEmpty(arguments))
+                command += " " + arguments;
+            StringBuilder commandLine = new StringBuilder(command);
+            if (!CreateProcessW(canonicalMstscPath, commandLine,
+                    IntPtr.Zero, IntPtr.Zero, false, CreateSuspended,
+                    IntPtr.Zero, Environment.SystemDirectory,
+                    ref startupInfo, out processInformation))
+            {
+                error = LastWin32Error("Windows could not create Remote Desktop");
+                return false;
+            }
+            processCreated = true;
+
+            if (!AssignProcessToJobObject(newJob, processInformation.Process))
+            {
+                error = LastWin32Error(
+                    "Windows could not isolate the Remote Desktop process");
+                return false;
+            }
+
+            if (ResumeThread(processInformation.Thread) == ResumeThreadFailed)
+            {
+                error = LastWin32Error("Windows could not start Remote Desktop");
+                return false;
+            }
+
+            jobHandle = newJob;
+            newJob = IntPtr.Zero;
+            rootProcessHandle = processInformation.Process;
+            processInformation.Process = IntPtr.Zero;
+            launchSucceeded = true;
+            return true;
         }
-        catch
+        finally
         {
-            return false;
+            if (processInformation.Thread != IntPtr.Zero)
+            {
+                CloseHandle(processInformation.Thread);
+                processInformation.Thread = IntPtr.Zero;
+            }
+            if (!launchSucceeded && processCreated &&
+                processInformation.Process != IntPtr.Zero)
+                TerminateProcess(processInformation.Process, 1);
+            if (processInformation.Process != IntPtr.Zero)
+                CloseHandle(processInformation.Process);
+            if (newJob != IntPtr.Zero)
+                CloseHandle(newJob);
         }
+    }
+
+    private static void CleanupRuntimeResources()
+    {
+        if (bannerWindow != IntPtr.Zero && IsWindow(bannerWindow))
+            DestroyWindow(bannerWindow);
+        bannerWindow = IntPtr.Zero;
+
+        if (bannerFont != IntPtr.Zero)
+        {
+            DeleteObject(bannerFont);
+            bannerFont = IntPtr.Zero;
+        }
+
+        if (selectedProcessHandle != IntPtr.Zero)
+        {
+            CloseHandle(selectedProcessHandle);
+            selectedProcessHandle = IntPtr.Zero;
+        }
+        if (rootProcessHandle != IntPtr.Zero)
+        {
+            CloseHandle(rootProcessHandle);
+            rootProcessHandle = IntPtr.Zero;
+        }
+        if (jobHandle != IntPtr.Zero)
+        {
+            CloseHandle(jobHandle);
+            jobHandle = IntPtr.Zero;
+        }
+        targetWindow = IntPtr.Zero;
+        targetSeen = false;
+        establishedProcessId = 0;
+    }
+
+    private static string CanonicalizePath(string path)
+    {
+        string value = path ?? "";
+        if (value.StartsWith("\\\\?\\", StringComparison.Ordinal))
+            value = value.Substring(4);
+        return Path.GetFullPath(value);
+    }
+
+    private static string QuoteCommandLineArgument(string value)
+    {
+        if (value == null)
+            value = "";
+        StringBuilder quoted = new StringBuilder();
+        quoted.Append('"');
+        int backslashes = 0;
+        foreach (char character in value)
+        {
+            if (character == '\\')
+            {
+                backslashes++;
+                continue;
+            }
+            if (character == '"')
+            {
+                quoted.Append('\\', backslashes * 2 + 1);
+                quoted.Append('"');
+                backslashes = 0;
+                continue;
+            }
+            quoted.Append('\\', backslashes);
+            backslashes = 0;
+            quoted.Append(character);
+        }
+        quoted.Append('\\', backslashes * 2);
+        quoted.Append('"');
+        return quoted.ToString();
+    }
+
+    private static string LastWin32Error(string operation)
+    {
+        int errorCode = Marshal.GetLastWin32Error();
+        string message = new System.ComponentModel.Win32Exception(errorCode).Message;
+        return operation + " (" + errorCode + "): " + message;
     }
 
     private static bool HasArgument(string[] args, string value)
@@ -881,10 +1314,15 @@ internal static class RdpSessionReminder
         {
             if (!SettingsStore.IsValidComputerName("workstation-01") ||
                 !SettingsStore.IsValidComputerName("10.0.0.25") ||
+                !SettingsStore.IsValidComputerName("10.0.0.25:3390") ||
                 !SettingsStore.IsValidComputerName("server.example.com:3390") ||
                 !SettingsStore.IsValidComputerName("[2001:db8::1]:3389") ||
                 !SettingsStore.IsValidComputerName("2001:db8::1") ||
                 SettingsStore.IsValidComputerName("bad name") ||
+                SettingsStore.IsValidComputerName("server: 3389") ||
+                SettingsStore.IsValidComputerName("010.0.0.1") ||
+                SettingsStore.IsValidComputerName("0x7f000001") ||
+                SettingsStore.IsValidComputerName("a\n.example") ||
                 SettingsStore.IsValidComputerName("-bad.example") ||
                 SettingsStore.IsValidComputerName("bad-.example") ||
                 SettingsStore.IsValidComputerName("bad..example") ||
@@ -907,14 +1345,13 @@ internal static class RdpSessionReminder
             expected.ComputerName = "workstation-01";
             expected.FullScreen = true;
             expected.ShortcutName = "Remote Workstation";
-            expected.RdpFile = "";
+            expected.RdpFile = Path.Combine(directory, "connection.rdp");
             expected.DisplayDevice = "\\\\.\\DISPLAY1";
             expected.ReminderText = "REMOTE SESSION - TEST LAB";
             SettingsStore.SaveTo(path, expected);
 
             ReminderSettings actual;
             bool loaded = SettingsStore.TryLoadFrom(path, out actual);
-            Directory.Delete(directory, true);
             if (!loaded || actual.ComputerName != expected.ComputerName ||
                 !actual.FullScreen || actual.ShortcutName != expected.ShortcutName ||
                 actual.RdpFile != expected.RdpFile ||
@@ -922,26 +1359,58 @@ internal static class RdpSessionReminder
                 actual.ReminderText != expected.ReminderText)
                 return 11;
 
-            DateTime deadline = DateTime.UtcNow.AddMinutes(1);
-            if (ShouldCloseReminder(false, 0, DateTime.UtcNow, deadline) ||
-                ShouldCloseReminder(true, 4, DateTime.UtcNow, deadline) ||
-                !ShouldCloseReminder(true, 5, DateTime.UtcNow, deadline) ||
-                !ShouldCloseReminder(false, 0, deadline, deadline))
+            string rdpPath = expected.RdpFile;
+            File.WriteAllLines(rdpPath, new string[] {
+                "full address:s:lab-a",
+                "alternate full address:s:lab-b"
+            });
+            ReminderSettings migrated = new ReminderSettings();
+            migrated.ComputerName = "lab-a";
+            migrated.RdpFile = rdpPath;
+            migrated.ReminderText = "REMOTE SESSION - LAB-A";
+            RefreshTargetFromRdpFile(migrated);
+            if (migrated.ComputerName != "lab-b" ||
+                migrated.ReminderText != "REMOTE SESSION - LAB-B")
+                return 18;
+
+            migrated.ComputerName = "lab-a";
+            migrated.ReminderText = "CUSTOM REMINDER";
+            RefreshTargetFromRdpFile(migrated);
+            if (migrated.ComputerName != "lab-b" ||
+                migrated.ReminderText != "CUSTOM REMINDER")
+                return 19;
+
+            string legacyPath = Path.Combine(directory, "legacy.ini");
+            File.WriteAllText(legacyPath,
+                "Computer=010.0.0.1" + Environment.NewLine +
+                "FullScreen=1" + Environment.NewLine +
+                "ShortcutName=Legacy" + Environment.NewLine +
+                "RdpFile=C:\\legacy\\connection.rdp" + Environment.NewLine +
+                "DisplayDevice=" + Environment.NewLine +
+                "ReminderText=REMOTE SESSION - 010.0.0.1" + Environment.NewLine);
+            ReminderSettings legacy;
+            bool legacyLoaded = SettingsStore.TryLoadFrom(
+                legacyPath, rdpPath, out legacy);
+            Directory.Delete(directory, true);
+            if (!legacyLoaded || legacy.ComputerName != "lab-b" ||
+                legacy.ReminderText != "REMOTE SESSION - LAB-B")
+                return 20;
+
+            if (DecideInitialLifecycle(0, 1) != LifecycleDecision.Stop ||
+                DecideInitialLifecycle(1, 0) != LifecycleDecision.Wait ||
+                DecideInitialLifecycle(1, 2) != LifecycleDecision.Wait ||
+                DecideInitialLifecycle(2, 1) != LifecycleDecision.Attach ||
+                DecideAttachedLifecycle(false, true, true, 0) !=
+                    LifecycleDecision.Stop ||
+                DecideAttachedLifecycle(true, true, false, 0) !=
+                    LifecycleDecision.KeepVisible ||
+                DecideAttachedLifecycle(true, false, true, 1) !=
+                    LifecycleDecision.KeepVisible ||
+                DecideAttachedLifecycle(true, false, false, 4) !=
+                    LifecycleDecision.HideAndWait ||
+                DecideAttachedLifecycle(true, false, false, 5) !=
+                    LifecycleDecision.Stop)
                 return 15;
-
-            Dictionary<int, int> parents = new Dictionary<int, int>();
-            parents[300] = 200;
-            parents[200] = 100;
-            parents[400] = 50;
-            if (!IsDescendantProcess(300, 100, parents) ||
-                !IsDescendantProcess(200, 100, parents) ||
-                IsDescendantProcess(400, 100, parents) ||
-                IsDescendantProcess(100, 100, parents))
-                return 16;
-
-            Dictionary<int, int> liveParents = GetProcessParents();
-            if (!liveParents.ContainsKey(Process.GetCurrentProcess().Id))
-                return 17;
 
             displayDevice = "";
             NativeRect workArea;
@@ -953,20 +1422,6 @@ internal static class RdpSessionReminder
         catch
         {
             return 12;
-        }
-    }
-
-    private static string StableHash(string value)
-    {
-        unchecked
-        {
-            uint hash = 2166136261;
-            foreach (char character in value.ToUpperInvariant())
-            {
-                hash ^= character;
-                hash *= 16777619;
-            }
-            return hash.ToString("X8");
         }
     }
 

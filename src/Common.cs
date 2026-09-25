@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -64,10 +65,38 @@ internal sealed class ReminderSettings
     public string ReminderText;
 }
 
+internal static class RdpFileTargetReader
+{
+    public static string TryReadTarget(string path)
+    {
+        string fullAddress = "";
+        string alternateAddress = "";
+        try
+        {
+            foreach (string line in File.ReadAllLines(path))
+            {
+                const string fullPrefix = "full address:s:";
+                const string alternatePrefix = "alternate full address:s:";
+                if (line.StartsWith(alternatePrefix,
+                    StringComparison.OrdinalIgnoreCase))
+                    alternateAddress = line.Substring(alternatePrefix.Length).Trim();
+                else if (line.StartsWith(fullPrefix,
+                    StringComparison.OrdinalIgnoreCase))
+                    fullAddress = line.Substring(fullPrefix.Length).Trim();
+            }
+        }
+        catch
+        {
+            return "";
+        }
+        return alternateAddress.Length > 0 ? alternateAddress : fullAddress;
+    }
+}
+
 internal static class SettingsStore
 {
     private static readonly Regex DnsLabelPattern = new Regex(
-        @"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$",
+        @"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\z",
         RegexOptions.CultureInvariant);
 
     public static bool IsValidComputerName(string value)
@@ -78,6 +107,11 @@ internal static class SettingsStore
         string computer = value.Trim();
         if (computer.Length > 255)
             return false;
+        foreach (char character in computer)
+        {
+            if (char.IsWhiteSpace(character) || char.IsControl(character))
+                return false;
+        }
 
         if (computer.StartsWith("[", StringComparison.Ordinal))
         {
@@ -99,9 +133,13 @@ internal static class SettingsStore
             return IsValidPort(computer.Substring(closingBracket + 2));
         }
 
+        if (IsCanonicalIpv4Address(computer))
+            return true;
+
         IPAddress address;
         if (IPAddress.TryParse(computer, out address))
-            return true;
+            return computer.IndexOf(':') >= 0 &&
+                address.AddressFamily == AddressFamily.InterNetworkV6;
 
         int firstColon = computer.IndexOf(':');
         int lastColon = computer.LastIndexOf(':');
@@ -109,8 +147,15 @@ internal static class SettingsStore
         {
             if (firstColon == 0 || firstColon == computer.Length - 1)
                 return false;
-            return IsValidHost(computer.Substring(0, firstColon)) &&
-                IsValidPort(computer.Substring(firstColon + 1));
+            string host = computer.Substring(0, firstColon);
+            if (!IsCanonicalIpv4Address(host))
+            {
+                IPAddress parsedHost;
+                if (IPAddress.TryParse(host, out parsedHost) ||
+                    !IsValidHost(host))
+                    return false;
+            }
+            return IsValidPort(computer.Substring(firstColon + 1));
         }
 
         if (firstColon >= 0)
@@ -130,7 +175,7 @@ internal static class SettingsStore
         if (host.Length == 0)
             return false;
 
-        bool numericDotsOnly = host.IndexOf('.') >= 0;
+        bool numericDotsOnly = true;
         foreach (char character in host)
         {
             if (character != '.' && (character < '0' || character > '9'))
@@ -154,8 +199,46 @@ internal static class SettingsStore
 
     private static bool IsValidPort(string value)
     {
+        if (string.IsNullOrEmpty(value) || value.Length > 5)
+            return false;
+        foreach (char character in value)
+        {
+            if (character < '0' || character > '9')
+                return false;
+        }
+
         int port;
-        return int.TryParse(value, out port) && port >= 1 && port <= 65535;
+        return int.TryParse(value, NumberStyles.None,
+            CultureInfo.InvariantCulture, out port) && port >= 1 && port <= 65535;
+    }
+
+    private static bool IsCanonicalIpv4Address(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return false;
+
+        string[] parts = value.Split('.');
+        if (parts.Length != 4)
+            return false;
+
+        foreach (string part in parts)
+        {
+            if (part.Length == 0 || part.Length > 3 ||
+                (part.Length > 1 && part[0] == '0'))
+                return false;
+
+            foreach (char character in part)
+            {
+                if (character < '0' || character > '9')
+                    return false;
+            }
+
+            int number;
+            if (!int.TryParse(part, NumberStyles.None,
+                    CultureInfo.InvariantCulture, out number) || number > 255)
+                return false;
+        }
+        return true;
     }
 
     public static string NormalizeComputerName(string value)
@@ -173,11 +256,35 @@ internal static class SettingsStore
             result = result.Replace(invalid, '-');
 
         result = result.Trim().TrimEnd('.', ' ');
+        if (result.Length > 80)
+            result = result.Substring(0, 80).TrimEnd('.', ' ');
         if (result.Length == 0)
             result = "RDP Session Reminder";
+        if (IsReservedWindowsFileName(result))
+            result = "Remote - " + result;
         if (result.Length > 80)
             result = result.Substring(0, 80).TrimEnd('.', ' ');
         return result;
+    }
+
+    private static bool IsReservedWindowsFileName(string value)
+    {
+        string stem = value;
+        int dot = stem.IndexOf('.');
+        if (dot >= 0)
+            stem = stem.Substring(0, dot);
+        stem = stem.TrimEnd(' ', '.').ToUpperInvariant();
+        if (stem == "CON" || stem == "PRN" || stem == "AUX" ||
+            stem == "NUL" || stem == "CONIN$" || stem == "CONOUT$")
+            return true;
+        if (stem.Length == 4 &&
+            (stem.StartsWith("COM", StringComparison.Ordinal) ||
+             stem.StartsWith("LPT", StringComparison.Ordinal)) &&
+            ((stem[3] >= '1' && stem[3] <= '9') ||
+             stem[3] == '\u00B9' || stem[3] == '\u00B2' ||
+             stem[3] == '\u00B3'))
+            return true;
+        return false;
     }
 
     public static string NormalizeReminderText(string value, string computer)
@@ -202,12 +309,22 @@ internal static class SettingsStore
 
     public static bool TryLoadProfile(string profileId, out ReminderSettings settings)
     {
-        settings = null;
-        return IsValidProfileId(profileId) &&
-            TryLoadFrom(AppPaths.GetProfileSettingsPath(profileId), out settings);
+        if (!IsValidProfileId(profileId))
+        {
+            settings = null;
+            return false;
+        }
+        return TryLoadFrom(AppPaths.GetProfileSettingsPath(profileId),
+            AppPaths.GetProfileConnectionPath(profileId), out settings);
     }
 
     public static bool TryLoadFrom(string path, out ReminderSettings settings)
+    {
+        return TryLoadFrom(path, null, out settings);
+    }
+
+    internal static bool TryLoadFrom(string path, string trustedRdpPath,
+        out ReminderSettings settings)
     {
         settings = null;
         if (!File.Exists(path))
@@ -251,7 +368,22 @@ internal static class SettingsStore
 
         computer = NormalizeComputerName(computer);
         if (!IsValidComputerName(computer))
-            return false;
+        {
+            if (string.IsNullOrEmpty(rdpFile) ||
+                string.IsNullOrEmpty(trustedRdpPath))
+                return false;
+
+            string migratedTarget = NormalizeComputerName(
+                RdpFileTargetReader.TryReadTarget(trustedRdpPath));
+            if (!IsValidComputerName(migratedTarget))
+                return false;
+
+            string oldDefault = NormalizeReminderText("", computer);
+            if (string.Equals(NormalizeReminderText(reminderText, computer),
+                    oldDefault, StringComparison.Ordinal))
+                reminderText = "";
+            computer = migratedTarget;
+        }
 
         settings = new ReminderSettings();
         settings.ComputerName = computer;

@@ -4,9 +4,9 @@ Bug reports and focused pull requests are welcome.
 
 Before submitting a change:
 
-1. Keep the runtime local, low-memory, and dependency-free.
+1. Keep the runtime local, small, and dependency-free.
 2. Do not add telemetry, credential handling, elevation, or remote-side software.
-3. Run `.\build.ps1` on Windows and confirm both self-tests pass.
+3. Run `.\build.ps1` on Windows and confirm all checks pass.
 4. Avoid committing personal hostnames, addresses, RDP files, certificates, or logs.
 5. Explain user-visible behavior and validation in the pull request.
 

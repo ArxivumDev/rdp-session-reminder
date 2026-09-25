@@ -52,6 +52,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & (Join-Path $repoRoot 'tests\SmokeTests.ps1') -DistDirectory $distDirectory
+& (Join-Path $repoRoot 'tests\ReflectionChecks.ps1') -DistDirectory $distDirectory
 
 $packageDirectory = Join-Path $distDirectory 'package'
 New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
@@ -71,6 +72,9 @@ $checksumLines = foreach ($file in $checksumFiles) {
 }
 $checksumPath = Join-Path $distDirectory 'SHA256SUMS.txt'
 [IO.File]::WriteAllLines($checksumPath, $checksumLines, [Text.UTF8Encoding]::new($false))
+
+& (Join-Path $repoRoot 'tests\PackageChecks.ps1') `
+    -RepoRoot $repoRoot -DistDirectory $distDirectory
 
 [pscustomobject]@{
     Runtime = $runtimeOutput

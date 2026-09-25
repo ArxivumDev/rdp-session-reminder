@@ -13,8 +13,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("RDP Session Reminder contributors")]
 [assembly: AssemblyProduct("RDP Session Reminder")]
 [assembly: AssemblyCopyright("Copyright (c) 2026")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 internal static class SetupProgram
 {
@@ -38,12 +38,62 @@ internal static class SetupProgram
         string directory = null;
         try
         {
-            if (!SettingsStore.IsValidComputerName("workstation-01"))
+            if (!SettingsStore.IsValidComputerName("workstation-01") ||
+                !SettingsStore.IsValidComputerName("10.0.0.25:3390") ||
+                !SettingsStore.IsValidComputerName("[2001:db8::1]:3389") ||
+                SettingsStore.IsValidComputerName("010.0.0.1") ||
+                SettingsStore.IsValidComputerName("server: 3389") ||
+                SettingsStore.IsValidComputerName("server:\uFF11\uFF12\uFF13") ||
+                SettingsStore.IsValidComputerName("a\n.example") ||
+                SettingsStore.IsValidComputerName("0x7f000001") ||
+                SettingsStore.IsValidComputerName("1234"))
                 return 20;
+
+            if (string.Equals(SettingsStore.NormalizeShortcutName(
+                    "CON", "workstation-01"), "CON", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(SettingsStore.NormalizeShortcutName(
+                    "LPT1.txt", "workstation-01"), "LPT1.txt",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(SettingsStore.NormalizeShortcutName(
+                    "COM\u00B9", "workstation-01"), "COM\u00B9",
+                    StringComparison.OrdinalIgnoreCase) ||
+                SettingsStore.NormalizeShortcutName(
+                    new string('.', 80) + "X", "workstation-01").Length == 0 ||
+                string.Equals(SettingsStore.NormalizeShortcutName(
+                    "CON" + new string(' ', 77) + "X", "workstation-01"),
+                    "CON", StringComparison.OrdinalIgnoreCase))
+                return 25;
 
             directory = Path.Combine(Path.GetTempPath(),
                 "RdpSessionReminderSetup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(directory);
+
+            string rdpPath = Path.Combine(directory, "target.rdp");
+            File.WriteAllLines(rdpPath, new string[] {
+                "FuLl AdDrEsS:s:lab-a",
+                "AlTeRnAtE FuLl AdDrEsS:s:lab-b"
+            });
+            if (SetupForm.TryReadRdpTarget(rdpPath) != "lab-b")
+                return 24;
+
+            File.WriteAllLines(rdpPath, new string[] {
+                "full address:s:lab-full"
+            });
+            if (SetupForm.TryReadRdpTarget(rdpPath) != "lab-full")
+                return 26;
+
+            File.WriteAllLines(rdpPath, new string[] {
+                "full address:s:lab-fallback",
+                "alternate full address:s:   "
+            });
+            if (SetupForm.TryReadRdpTarget(rdpPath) != "lab-fallback")
+                return 27;
+
+            File.WriteAllLines(rdpPath, new string[] {
+                "screen mode id:i:2"
+            });
+            if (SetupForm.TryReadRdpTarget(rdpPath).Length != 0)
+                return 28;
 
             string existing = Path.Combine(directory, "Remote Lab.lnk");
             File.WriteAllText(existing, "unrelated shortcut placeholder");
@@ -125,7 +175,7 @@ internal sealed class SetupForm : Form
         Label computerLabel = new Label();
         computerLabel.AutoSize = true;
         computerLabel.Location = new Point(30, 126);
-        computerLabel.Text = "Computer name or IP address";
+        computerLabel.Text = "Computer name or IP address (read from a selected .rdp file)";
         Controls.Add(computerLabel);
 
         computerText = new TextBox();
@@ -146,10 +196,7 @@ internal sealed class SetupForm : Form
         rdpFileText.Location = new Point(33, 213);
         rdpFileText.Size = new Size(385, 25);
         rdpFileText.TabIndex = 1;
-        rdpFileText.TextChanged += delegate
-        {
-            fullScreenCheck.Enabled = string.IsNullOrWhiteSpace(rdpFileText.Text);
-        };
+        rdpFileText.TextChanged += RdpFileTextChanged;
         Controls.Add(rdpFileText);
 
         Button browseButton = new Button();
@@ -277,28 +324,30 @@ internal sealed class SetupForm : Form
                 return;
 
             rdpFileText.Text = dialog.FileName;
-            string address = TryReadFullAddress(dialog.FileName);
-            if (!string.IsNullOrEmpty(address) &&
-                SettingsStore.IsValidComputerName(address))
-                computerText.Text = address;
         }
     }
 
-    private static string TryReadFullAddress(string path)
+    private void RdpFileTextChanged(object sender, EventArgs eventArgs)
     {
-        try
+        string path = rdpFileText.Text.Trim();
+        bool hasRdpFile = path.Length > 0;
+        fullScreenCheck.Enabled = !hasRdpFile;
+        computerText.ReadOnly = false;
+
+        if (!hasRdpFile || !File.Exists(path))
+            return;
+
+        string address = TryReadRdpTarget(path);
+        if (SettingsStore.IsValidComputerName(address))
         {
-            foreach (string line in File.ReadAllLines(path))
-            {
-                const string prefix = "full address:s:";
-                if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    return line.Substring(prefix.Length).Trim();
-            }
+            computerText.Text = SettingsStore.NormalizeComputerName(address);
+            computerText.ReadOnly = true;
         }
-        catch
-        {
-        }
-        return "";
+    }
+
+    internal static string TryReadRdpTarget(string path)
+    {
+        return RdpFileTargetReader.TryReadTarget(path);
     }
 
     private void ComputerTextChanged(object sender, EventArgs eventArgs)
@@ -328,17 +377,6 @@ internal sealed class SetupForm : Form
 
     private void SaveAndConnect(object sender, EventArgs eventArgs)
     {
-        string computer = SettingsStore.NormalizeComputerName(computerText.Text);
-        if (!SettingsStore.IsValidComputerName(computer))
-        {
-            MessageBox.Show(this,
-                "Enter a valid computer name, DNS name, IP address, or optional port.",
-                AppPaths.ProductName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            computerText.Focus();
-            computerText.SelectAll();
-            return;
-        }
-
         string selectedRdpFile = rdpFileText.Text.Trim();
         if (selectedRdpFile.Length > 0 &&
             (!File.Exists(selectedRdpFile) ||
@@ -351,6 +389,42 @@ internal sealed class SetupForm : Form
             rdpFileText.Focus();
             rdpFileText.SelectAll();
             return;
+        }
+
+        string computer;
+        if (selectedRdpFile.Length > 0)
+        {
+            computer = SettingsStore.NormalizeComputerName(
+                TryReadRdpTarget(selectedRdpFile));
+            if (!SettingsStore.IsValidComputerName(computer))
+            {
+                MessageBox.Show(this,
+                    "The selected .rdp file does not contain a valid " +
+                    "alternate full address or full address.",
+                    AppPaths.ProductName, MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                rdpFileText.Focus();
+                rdpFileText.SelectAll();
+                return;
+            }
+            computerText.Text = computer;
+            computerText.ReadOnly = true;
+            if (!reminderManuallyEdited)
+                SetReminderText("REMOTE SESSION - " + computer.ToUpperInvariant());
+        }
+        else
+        {
+            computer = SettingsStore.NormalizeComputerName(computerText.Text);
+            if (!SettingsStore.IsValidComputerName(computer))
+            {
+                MessageBox.Show(this,
+                    "Enter a valid computer name, DNS name, IP address, or optional port.",
+                    AppPaths.ProductName, MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                computerText.Focus();
+                computerText.SelectAll();
+                return;
+            }
         }
 
         string profileId = Guid.NewGuid().ToString("N");
@@ -375,7 +449,26 @@ internal sealed class SetupForm : Form
             InstallApplicationFiles();
             Directory.CreateDirectory(profileDirectory);
             if (selectedRdpFile.Length > 0)
-                CopyRdpFileVerified(selectedRdpFile, settings.RdpFile);
+            {
+                string profileRdpFile = AppPaths.GetProfileConnectionPath(profileId);
+                CopyRdpFileVerified(selectedRdpFile,
+                    profileRdpFile);
+                string copiedTarget = SettingsStore.NormalizeComputerName(
+                    TryReadRdpTarget(profileRdpFile));
+                if (!SettingsStore.IsValidComputerName(copiedTarget))
+                    throw new InvalidDataException(
+                        "The copied .rdp file does not contain a valid " +
+                        "alternate full address or full address.");
+
+                settings.ComputerName = copiedTarget;
+                if (!shortcutManuallyEdited)
+                    settings.ShortcutName = SettingsStore.NormalizeShortcutName(
+                        "Remote - " + copiedTarget, copiedTarget);
+                if (!reminderManuallyEdited)
+                    settings.ReminderText = SettingsStore.NormalizeReminderText(
+                        "REMOTE SESSION - " + copiedTarget.ToUpperInvariant(),
+                        copiedTarget);
+            }
 
             string desktop = Environment.GetFolderPath(
                 Environment.SpecialFolder.DesktopDirectory);
@@ -430,8 +523,12 @@ internal sealed class SetupForm : Form
         {
             CleanupFailedProfile(
                 profileDirectory, reservedShortcutPath, shortcutCompleted);
+            string message = shortcutCompleted
+                ? "The shortcut was created, but the connection could not be started. " +
+                    "Open the new desktop shortcut to try again."
+                : "Setup could not be completed.";
             MessageBox.Show(this,
-                "Setup could not be completed.\r\n\r\n" + exception.Message,
+                message + "\r\n\r\n" + exception.Message,
                 AppPaths.ProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
@@ -476,9 +573,10 @@ internal sealed class SetupForm : Form
         string currentSetup = Application.ExecutablePath;
         string currentDirectory = Path.GetDirectoryName(currentSetup);
         string sourceRuntime = Path.Combine(currentDirectory, AppPaths.RuntimeFileName);
-        if (!File.Exists(sourceRuntime) && !File.Exists(AppPaths.RuntimePath))
+        if (!File.Exists(sourceRuntime))
             throw new FileNotFoundException(
-                "The runtime executable is missing from the release package.", sourceRuntime);
+                "The runtime executable is missing. Extract and run setup from " +
+                "the complete release package.", sourceRuntime);
 
         CopyUnlessSame(sourceRuntime, AppPaths.RuntimePath);
         CopyUnlessSame(currentSetup, AppPaths.SetupPath);
