@@ -30,6 +30,11 @@ internal static class AppPaths
         get { return Path.Combine(InstallDirectory, "profiles"); }
     }
 
+    public static string OneTimeProfilesDirectory
+    {
+        get { return Path.Combine(InstallDirectory, "one-time"); }
+    }
+
     public static string RuntimePath
     {
         get { return Path.Combine(InstallDirectory, RuntimeFileName); }
@@ -54,6 +59,21 @@ internal static class AppPaths
     {
         return Path.Combine(GetProfileDirectory(profileId), ConnectionFileName);
     }
+
+    public static string GetOneTimeProfileDirectory(string profileId)
+    {
+        return Path.Combine(OneTimeProfilesDirectory, profileId);
+    }
+
+    public static string GetOneTimeSettingsPath(string profileId)
+    {
+        return Path.Combine(GetOneTimeProfileDirectory(profileId), SettingsFileName);
+    }
+
+    public static string GetOneTimeConnectionPath(string profileId)
+    {
+        return Path.Combine(GetOneTimeProfileDirectory(profileId), ConnectionFileName);
+    }
 }
 
 internal sealed class ReminderSettings
@@ -64,6 +84,15 @@ internal sealed class ReminderSettings
     public string RdpFile;
     public string DisplayDevice;
     public string ReminderText;
+    public string ShortLabel = "";
+    public string BannerPreset = "Default";
+    public string BannerBackground = "#182335";
+    public string BannerForeground = "#FFFFFF";
+    public string BannerCorner = "BottomRight";
+    public int BannerVerticalOffset = 64;
+    public string BannerSize = "Medium";
+    public int BannerOpacity = 97;
+    public bool IdleDimming;
 }
 
 internal static class RdpFileTargetReader
@@ -436,6 +465,21 @@ internal static class SettingsStore
             AppPaths.GetProfileConnectionPath(profileId), out settings);
     }
 
+    public static bool TryLoadOneTimeProfile(string profileId,
+        out ReminderSettings settings)
+    {
+        string settingsPath;
+        string connectionPath;
+        string error;
+        if (!OneTimeProfileStore.TryGetExactPaths(profileId,
+                out settingsPath, out connectionPath, out error))
+        {
+            settings = null;
+            return false;
+        }
+        return TryLoadFrom(settingsPath, connectionPath, out settings);
+    }
+
     public static bool TryLoadFrom(string path, out ReminderSettings settings)
     {
         return TryLoadFrom(path, null, out settings);
@@ -453,6 +497,15 @@ internal static class SettingsStore
         string rdpFile = "";
         string displayDevice = "";
         string reminderText = "";
+        string shortLabel = "";
+        string bannerPreset = "Default";
+        string bannerBackground = "";
+        string bannerForeground = "";
+        string bannerCorner = "BottomRight";
+        int bannerVerticalOffset = 64;
+        string bannerSize = "Medium";
+        int bannerOpacity = 97;
+        bool idleDimming = false;
         bool fullScreen = true;
 
         try
@@ -477,6 +530,34 @@ internal static class SettingsStore
                     displayDevice = value;
                 else if (key.Equals("ReminderText", StringComparison.OrdinalIgnoreCase))
                     reminderText = value;
+                else if (key.Equals("ShortLabel", StringComparison.OrdinalIgnoreCase))
+                    shortLabel = value;
+                else if (key.Equals("BannerPreset", StringComparison.OrdinalIgnoreCase))
+                    bannerPreset = value;
+                else if (key.Equals("BannerBackground", StringComparison.OrdinalIgnoreCase))
+                    bannerBackground = value;
+                else if (key.Equals("BannerForeground", StringComparison.OrdinalIgnoreCase))
+                    bannerForeground = value;
+                else if (key.Equals("BannerCorner", StringComparison.OrdinalIgnoreCase))
+                    bannerCorner = value;
+                else if (key.Equals("BannerVerticalOffset", StringComparison.OrdinalIgnoreCase))
+                {
+                    int parsedOffset;
+                    if (int.TryParse(value, NumberStyles.Integer,
+                            CultureInfo.InvariantCulture, out parsedOffset))
+                        bannerVerticalOffset = parsedOffset;
+                }
+                else if (key.Equals("BannerSize", StringComparison.OrdinalIgnoreCase))
+                    bannerSize = value;
+                else if (key.Equals("BannerOpacity", StringComparison.OrdinalIgnoreCase))
+                {
+                    int parsedOpacity;
+                    if (int.TryParse(value, NumberStyles.Integer,
+                            CultureInfo.InvariantCulture, out parsedOpacity))
+                        bannerOpacity = parsedOpacity;
+                }
+                else if (key.Equals("IdleDimming", StringComparison.OrdinalIgnoreCase))
+                    idleDimming = value == "1";
             }
         }
         catch
@@ -510,6 +591,18 @@ internal static class SettingsStore
         settings.RdpFile = rdpFile;
         settings.DisplayDevice = displayDevice;
         settings.ReminderText = NormalizeReminderText(reminderText, computer);
+        settings.ShortLabel = NormalizeShortLabel(shortLabel);
+        settings.BannerPreset = NormalizeBannerPreset(bannerPreset);
+        settings.BannerBackground = NormalizeBannerColor(
+            bannerBackground, GetPresetBackground(settings.BannerPreset));
+        settings.BannerForeground = NormalizeBannerColor(
+            bannerForeground, GetPresetForeground(settings.BannerPreset));
+        settings.BannerCorner = NormalizeBannerCorner(bannerCorner);
+        settings.BannerVerticalOffset = NormalizeBannerVerticalOffset(
+            bannerVerticalOffset);
+        settings.BannerSize = NormalizeBannerSize(bannerSize);
+        settings.BannerOpacity = NormalizeBannerOpacity(bannerOpacity);
+        settings.IdleDimming = idleDimming;
         return true;
     }
 
@@ -531,7 +624,30 @@ internal static class SettingsStore
             "RdpFile=" + SafeSingleLine(settings.RdpFile) + Environment.NewLine +
             "DisplayDevice=" + SafeSingleLine(settings.DisplayDevice) + Environment.NewLine +
             "ReminderText=" + NormalizeReminderText(
-                settings.ReminderText, computer) + Environment.NewLine;
+                settings.ReminderText, computer) + Environment.NewLine +
+            "ShortLabel=" + NormalizeShortLabel(settings.ShortLabel) + Environment.NewLine +
+            "BannerPreset=" + NormalizeBannerPreset(
+                settings.BannerPreset) + Environment.NewLine +
+            "BannerBackground=" + NormalizeBannerColor(
+                settings.BannerBackground,
+                GetPresetBackground(NormalizeBannerPreset(
+                    settings.BannerPreset))) + Environment.NewLine +
+            "BannerForeground=" + NormalizeBannerColor(
+                settings.BannerForeground,
+                GetPresetForeground(NormalizeBannerPreset(
+                    settings.BannerPreset))) + Environment.NewLine +
+            "BannerCorner=" + NormalizeBannerCorner(
+                settings.BannerCorner) + Environment.NewLine +
+            "BannerVerticalOffset=" + NormalizeBannerVerticalOffset(
+                settings.BannerVerticalOffset).ToString(
+                    CultureInfo.InvariantCulture) + Environment.NewLine +
+            "BannerSize=" + NormalizeBannerSize(
+                settings.BannerSize) + Environment.NewLine +
+            "BannerOpacity=" + NormalizeBannerOpacity(
+                settings.BannerOpacity).ToString(
+                    CultureInfo.InvariantCulture) + Environment.NewLine +
+            "IdleDimming=" + (settings.IdleDimming ? "1" : "0") +
+                Environment.NewLine;
 
         string temporary = path + ".new";
         File.WriteAllText(temporary, content, new UTF8Encoding(false));
@@ -546,5 +662,277 @@ internal static class SettingsStore
         return string.IsNullOrEmpty(value)
             ? ""
             : value.Replace("\r", "").Replace("\n", "").Trim();
+    }
+
+    public static string NormalizeShortLabel(string value)
+    {
+        string result = SafeSingleLine(value)
+            .Replace('\u2013', '-')
+            .Replace('\u2014', '-')
+            .Replace('\u2212', '-');
+        if (result.Length > 24)
+            result = result.Substring(0, 24).Trim();
+        return result;
+    }
+
+    public static string NormalizeBannerPreset(string value)
+    {
+        string preset = SafeSingleLine(value);
+        string[] allowed = new string[] {
+            "Default", "Work", "Personal", "Test", "Production", "Custom"
+        };
+        foreach (string candidate in allowed)
+        {
+            if (string.Equals(preset, candidate,
+                    StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+        return "Default";
+    }
+
+    public static string GetPresetBackground(string preset)
+    {
+        switch (NormalizeBannerPreset(preset))
+        {
+            case "Work": return "#334155";
+            case "Personal": return "#145DA0";
+            case "Test": return "#92400E";
+            case "Production": return "#991B1B";
+            default: return "#182335";
+        }
+    }
+
+    public static string GetPresetForeground(string preset)
+    {
+        return "#FFFFFF";
+    }
+
+    public static string NormalizeBannerColor(string value, string fallback)
+    {
+        string color = SafeSingleLine(value).ToUpperInvariant();
+        if (color.Length == 7 && color[0] == '#')
+        {
+            for (int index = 1; index < color.Length; index++)
+            {
+                char character = color[index];
+                if (!((character >= '0' && character <= '9') ||
+                      (character >= 'A' && character <= 'F')))
+                    return NormalizeBannerColor(fallback, "#182335");
+            }
+            return color;
+        }
+        if (!string.Equals(fallback, value, StringComparison.Ordinal))
+            return NormalizeBannerColor(fallback, "#182335");
+        return "#182335";
+    }
+
+    public static string NormalizeBannerCorner(string value)
+    {
+        string corner = SafeSingleLine(value);
+        string[] allowed = new string[] {
+            "TopLeft", "TopRight", "BottomLeft", "BottomRight"
+        };
+        foreach (string candidate in allowed)
+        {
+            if (string.Equals(corner, candidate,
+                    StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+        return "BottomRight";
+    }
+
+    public static int NormalizeBannerVerticalOffset(int value)
+    {
+        return value >= 0 && value <= 600 ? value : 64;
+    }
+
+    public static string NormalizeBannerSize(string value)
+    {
+        string size = SafeSingleLine(value);
+        string[] allowed = new string[] { "Small", "Medium", "Large" };
+        foreach (string candidate in allowed)
+        {
+            if (string.Equals(size, candidate,
+                    StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+        return "Medium";
+    }
+
+    public static int NormalizeBannerOpacity(int value)
+    {
+        return value >= 50 && value <= 100 ? value : 97;
+    }
+}
+
+internal static class OneTimeProfileStore
+{
+    public static bool TryGetExactPaths(string profileId,
+        out string settingsPath, out string connectionPath, out string error)
+    {
+        settingsPath = "";
+        connectionPath = "";
+        error = "";
+        if (!SettingsStore.IsValidProfileId(profileId))
+        {
+            error = "The one-time profile identifier is invalid.";
+            return false;
+        }
+
+        try
+        {
+            string installDirectory = Path.GetFullPath(AppPaths.InstallDirectory);
+            string root = Path.GetFullPath(AppPaths.OneTimeProfilesDirectory);
+            string directory = Path.GetFullPath(
+                AppPaths.GetOneTimeProfileDirectory(profileId));
+            if (!IsDirectChild(root, directory, profileId))
+            {
+                error = "The one-time profile path is outside its managed folder.";
+                return false;
+            }
+            if ((Directory.Exists(installDirectory) &&
+                    IsReparsePoint(installDirectory)) ||
+                (Directory.Exists(root) && IsReparsePoint(root)) ||
+                !Directory.Exists(directory) || IsReparsePoint(directory))
+            {
+                error = "The one-time profile path could not be verified.";
+                return false;
+            }
+
+            settingsPath = Path.GetFullPath(Path.Combine(
+                directory, AppPaths.SettingsFileName));
+            connectionPath = Path.GetFullPath(Path.Combine(
+                directory, AppPaths.ConnectionFileName));
+            if (!IsDirectFile(directory, settingsPath) ||
+                !IsDirectFile(directory, connectionPath) ||
+                !File.Exists(settingsPath) || IsReparsePoint(settingsPath) ||
+                (File.Exists(connectionPath) && IsReparsePoint(connectionPath)))
+            {
+                settingsPath = "";
+                connectionPath = "";
+                error = "The one-time profile files could not be verified.";
+                return false;
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            settingsPath = "";
+            connectionPath = "";
+            error = exception.Message;
+            return false;
+        }
+    }
+
+    public static bool TryDeleteExact(string profileId, out string error)
+    {
+        if (Directory.Exists(AppPaths.InstallDirectory) &&
+            IsReparsePoint(AppPaths.InstallDirectory))
+        {
+            error = "The application data folder is a reparse point.";
+            return false;
+        }
+        return TryDeleteExactFromRoot(
+            AppPaths.OneTimeProfilesDirectory, profileId, out error);
+    }
+
+    internal static bool TryDeleteExactFromRoot(
+        string root, string profileId, out string error)
+    {
+        error = "";
+        if (!SettingsStore.IsValidProfileId(profileId))
+        {
+            error = "The one-time profile identifier is invalid.";
+            return false;
+        }
+
+        try
+        {
+            string canonicalRoot = Path.GetFullPath(root);
+            string canonicalDirectory = Path.GetFullPath(Path.Combine(
+                canonicalRoot, profileId));
+            if (!IsDirectChild(canonicalRoot, canonicalDirectory, profileId))
+            {
+                error = "The one-time profile path is outside its managed folder.";
+                return false;
+            }
+
+            if (Directory.Exists(canonicalRoot) &&
+                IsReparsePoint(canonicalRoot))
+            {
+                error = "The managed one-time profile folder is a reparse point.";
+                return false;
+            }
+            if (!Directory.Exists(canonicalDirectory))
+                return true;
+            if (IsReparsePoint(canonicalDirectory))
+            {
+                error = "The one-time profile folder is a reparse point.";
+                return false;
+            }
+
+            string[] ownedFileNames = new string[] {
+                AppPaths.SettingsFileName, AppPaths.ConnectionFileName
+            };
+            List<string> ownedFiles = new List<string>();
+            foreach (string fileName in ownedFileNames)
+            {
+                string path = Path.GetFullPath(Path.Combine(
+                    canonicalDirectory, fileName));
+                if (!IsDirectFile(canonicalDirectory, path))
+                {
+                    error = "A one-time profile file resolved outside its folder.";
+                    return false;
+                }
+                if (File.Exists(path))
+                {
+                    if (IsReparsePoint(path))
+                    {
+                        error = "A one-time profile file is a reparse point.";
+                        return false;
+                    }
+                    ownedFiles.Add(path);
+                }
+            }
+
+            foreach (string path in ownedFiles)
+                File.Delete(path);
+
+            if (Directory.GetFileSystemEntries(canonicalDirectory).Length == 0)
+                Directory.Delete(canonicalDirectory, false);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+    }
+
+    private static bool IsReparsePoint(string path)
+    {
+        return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+    }
+
+    private static bool IsDirectChild(
+        string root, string directory, string expectedName)
+    {
+        string requiredPrefix = root.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar;
+        return directory.StartsWith(requiredPrefix,
+                StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(Path.GetDirectoryName(directory),
+                root.TrimEnd(Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(Path.GetFileName(directory), expectedName,
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDirectFile(string directory, string path)
+    {
+        return string.Equals(Path.GetDirectoryName(path), directory,
+            StringComparison.OrdinalIgnoreCase);
     }
 }

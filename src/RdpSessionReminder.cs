@@ -133,6 +133,13 @@ internal static class RdpSessionReminder
         public uint TotalTerminatedProcesses;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LastInputInfo
+    {
+        public uint Size;
+        public uint Time;
+    }
+
     private sealed class RdpWindowCandidate
     {
         public IntPtr Window;
@@ -324,6 +331,12 @@ internal static class RdpSessionReminder
     private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
 
     [DllImport("user32.dll")]
+    private static extern bool GetLastInputInfo(ref LastInputInfo information);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetTickCount();
+
+    [DllImport("user32.dll")]
     private static extern uint GetDpiForSystem();
 
     [DllImport("shcore.dll")]
@@ -363,6 +376,7 @@ internal static class RdpSessionReminder
     private const int ShowWindowHide = 0;
     private const int TransparentBackground = 1;
     private const int FontWeightSemibold = 600;
+    private const uint IdleDimAfterMilliseconds = 120000;
     private static readonly IntPtr Topmost = new IntPtr(-1);
     private static readonly UIntPtr MonitorTimer = new UIntPtr(1);
     private static readonly WindowProc WindowProcedure = HandleWindowMessage;
@@ -377,14 +391,23 @@ internal static class RdpSessionReminder
     private static IntPtr bannerFont;
     private static string bannerText;
     private static string displayDevice;
+    private static string bannerCorner;
+    private static string bannerSize;
     private static bool targetSeen;
     private static int missingTicks;
     private static int bannerWidth;
     private static int bannerHeight;
     private static int bannerLogicalWidth;
+    private static int bannerLogicalVerticalOffset;
     private static uint bannerDpi;
     private static int rightMargin;
     private static int bottomLift;
+    private static uint bannerBackgroundColor;
+    private static uint bannerForegroundColor;
+    private static byte bannerNormalAlpha;
+    private static byte bannerDimAlpha;
+    private static bool idleDimmingEnabled;
+    private static bool bannerIsDimmed;
     private static Mutex instanceMutex;
     private static bool mutexAcquired;
 
@@ -401,35 +424,55 @@ internal static class RdpSessionReminder
         }
 
         int profileIndex = FindArgument(args, "--profile");
-        if (profileIndex < 0)
+        int oneTimeIndex = FindArgument(args, "--one-time");
+        if (profileIndex < 0 && oneTimeIndex < 0)
         {
             StartSetup();
             return 0;
         }
 
-        if (profileIndex + 1 >= args.Length ||
-            !SettingsStore.IsValidProfileId(args[profileIndex + 1]))
+        if (profileIndex >= 0 && oneTimeIndex >= 0)
+        {
+            ShowError("This launch contains conflicting reminder profile options. " +
+                "Run setup again.");
+            return 1;
+        }
+
+        bool oneTime = oneTimeIndex >= 0;
+        int selectedIndex = oneTime ? oneTimeIndex : profileIndex;
+        if (selectedIndex + 1 >= args.Length ||
+            !SettingsStore.IsValidProfileId(args[selectedIndex + 1]))
         {
             ShowError("This shortcut does not contain a valid reminder profile. " +
                 "Run setup to create a new shortcut.");
             return 1;
         }
 
-        string profileId = args[profileIndex + 1];
+        string profileId = args[selectedIndex + 1];
         ReminderSettings settings;
-        if (!SettingsStore.TryLoadProfile(profileId, out settings))
+        bool loaded = oneTime
+            ? SettingsStore.TryLoadOneTimeProfile(profileId, out settings)
+            : SettingsStore.TryLoadProfile(profileId, out settings);
+        if (!loaded)
         {
-            ShowError("This shortcut's reminder profile is missing or invalid. " +
-                "Run setup to create a new shortcut.");
+            if (oneTime)
+                CleanupOneTimeProfile(profileId, false);
+            ShowError(oneTime
+                ? "This one-time connection is missing or invalid. Run setup again."
+                : "This shortcut's reminder profile is missing or invalid. " +
+                    "Run setup to create a new shortcut.");
             return 1;
         }
         if (!string.IsNullOrEmpty(settings.RdpFile))
         {
-            settings.RdpFile = AppPaths.GetProfileConnectionPath(profileId);
+            settings.RdpFile = oneTime
+                ? AppPaths.GetOneTimeConnectionPath(profileId)
+                : AppPaths.GetProfileConnectionPath(profileId);
             RefreshTargetFromRdpFile(settings);
         }
 
-        string mutexName = "Local\\RdpSessionReminder-" + profileId.ToUpperInvariant();
+        string mutexName = "Local\\RdpSessionReminder-" +
+            (oneTime ? "OneTime-" : "") + profileId.ToUpperInvariant();
         mutexAcquired = false;
         try
         {
@@ -487,6 +530,8 @@ internal static class RdpSessionReminder
                 instanceMutex.Dispose();
                 instanceMutex = null;
             }
+            if (oneTime)
+                CleanupOneTimeProfile(profileId, true);
         }
     }
 
@@ -511,11 +556,27 @@ internal static class RdpSessionReminder
             bannerFont = IntPtr.Zero;
             targetSeen = false;
             missingTicks = 0;
-            bannerText = SettingsStore.NormalizeReminderText(
-                settings.ReminderText, settings.ComputerName);
-            bannerLogicalWidth = Math.Max(350,
-                Math.Min(650, 120 + bannerText.Length * 8));
+            bannerText = BuildBannerText(settings.ShortLabel,
+                SettingsStore.NormalizeReminderText(
+                    settings.ReminderText, settings.ComputerName));
+            bannerSize = SettingsStore.NormalizeBannerSize(settings.BannerSize);
+            bannerLogicalWidth = CalculateBannerLogicalWidth(
+                bannerText, bannerSize);
             displayDevice = settings.DisplayDevice ?? "";
+            bannerCorner = SettingsStore.NormalizeBannerCorner(
+                settings.BannerCorner);
+            bannerLogicalVerticalOffset = SettingsStore.NormalizeBannerVerticalOffset(
+                settings.BannerVerticalOffset);
+            bannerBackgroundColor = ParseBannerColor(
+                settings.BannerBackground, "#182335");
+            bannerForegroundColor = ParseBannerColor(
+                settings.BannerForeground, "#FFFFFF");
+            bannerNormalAlpha = OpacityToAlpha(
+                SettingsStore.NormalizeBannerOpacity(settings.BannerOpacity));
+            bannerDimAlpha = (byte)Math.Max(96,
+                bannerNormalAlpha * 65 / 100);
+            idleDimmingEnabled = settings.IdleDimming;
+            bannerIsDimmed = false;
             ApplyBannerDpi(GetSelectedDisplayDpi());
             canonicalMstscPath = CanonicalizePath(
                 Path.Combine(Environment.SystemDirectory, "mstsc.exe"));
@@ -572,7 +633,8 @@ internal static class RdpSessionReminder
             }
 
             RecreateBannerFont();
-            SetLayeredWindowAttributes(bannerWindow, 0, 247, LayeredAlpha);
+            SetLayeredWindowAttributes(bannerWindow, 0,
+                bannerNormalAlpha, LayeredAlpha);
             if (SetTimer(bannerWindow, MonitorTimer, 1000, IntPtr.Zero) ==
                 UIntPtr.Zero)
             {
@@ -806,10 +868,38 @@ internal static class RdpSessionReminder
             workArea.Bottom = 1080;
         }
 
-        int x = workArea.Right - bannerWidth - rightMargin;
-        int y = workArea.Bottom - bannerHeight - bottomLift;
+        int[] position = CalculateBannerPosition(bannerCorner,
+            workArea.Left, workArea.Top, workArea.Right, workArea.Bottom,
+            bannerWidth, bannerHeight, rightMargin, bottomLift);
+        int x = position[0];
+        int y = position[1];
         SetWindowPos(bannerWindow, Topmost, x, y, bannerWidth, bannerHeight,
             SetPositionNoActivate | SetPositionShowWindow);
+        UpdateIdleDimming();
+    }
+
+    private static int[] CalculateBannerPosition(string corner,
+        int left, int top, int right, int bottom, int width, int height,
+        int horizontalMargin, int verticalOffset)
+    {
+        string normalizedCorner = SettingsStore.NormalizeBannerCorner(corner);
+        bool atLeft = normalizedCorner.EndsWith("Left",
+            StringComparison.Ordinal);
+        bool atTop = normalizedCorner.StartsWith("Top",
+            StringComparison.Ordinal);
+        int minimumX = left;
+        int maximumX = Math.Max(left, right - width);
+        int minimumY = top;
+        int maximumY = Math.Max(top, bottom - height);
+        int x = atLeft
+            ? left + horizontalMargin
+            : right - width - horizontalMargin;
+        int y = atTop
+            ? top + verticalOffset
+            : bottom - height - verticalOffset;
+        x = Math.Max(minimumX, Math.Min(maximumX, x));
+        y = Math.Max(minimumY, Math.Min(maximumY, y));
+        return new int[] { x, y };
     }
 
     private static bool TryGetSelectedWorkArea(out NativeRect workArea)
@@ -896,9 +986,9 @@ internal static class RdpSessionReminder
     {
         bannerDpi = dpi == 0 ? 96 : dpi;
         bannerWidth = Scale(bannerLogicalWidth, bannerDpi);
-        bannerHeight = Scale(34, bannerDpi);
+        bannerHeight = Scale(GetBannerLogicalHeight(bannerSize), bannerDpi);
         rightMargin = Scale(20, bannerDpi);
-        bottomLift = Scale(64, bannerDpi);
+        bottomLift = Scale(bannerLogicalVerticalOffset, bannerDpi);
         if (bannerWindow != IntPtr.Zero)
         {
             RecreateBannerFont();
@@ -908,7 +998,8 @@ internal static class RdpSessionReminder
 
     private static void RecreateBannerFont()
     {
-        IntPtr newFont = CreateFont(-Scale(17, bannerDpi), 0, 0, 0,
+        IntPtr newFont = CreateFont(
+            -Scale(GetBannerLogicalFontSize(bannerSize), bannerDpi), 0, 0, 0,
             FontWeightSemibold, 0, 0, 0, 1, 0, 0, 5, 0,
             "Segoe UI Semibold");
         if (newFont == IntPtr.Zero)
@@ -931,12 +1022,12 @@ internal static class RdpSessionReminder
         NativeRect rectangle = new NativeRect();
         rectangle.Right = bannerWidth;
         rectangle.Bottom = bannerHeight;
-        IntPtr brush = CreateSolidBrush(Color(24, 35, 53));
+        IntPtr brush = CreateSolidBrush(bannerBackgroundColor);
         FillRect(deviceContext, ref rectangle, brush);
         DeleteObject(brush);
 
         SetBkMode(deviceContext, TransparentBackground);
-        SetTextColor(deviceContext, Color(255, 255, 255));
+        SetTextColor(deviceContext, bannerForegroundColor);
         IntPtr previousFont = IntPtr.Zero;
         if (bannerFont != IntPtr.Zero)
             previousFont = SelectObject(deviceContext, bannerFont);
@@ -947,6 +1038,95 @@ internal static class RdpSessionReminder
         if (previousFont != IntPtr.Zero)
             SelectObject(deviceContext, previousFont);
         EndPaint(hWnd, ref paint);
+    }
+
+    private static string BuildBannerText(string shortLabel, string reminderText)
+    {
+        string label = SettingsStore.NormalizeShortLabel(shortLabel);
+        return label.Length == 0
+            ? reminderText
+            : label + "  |  " + reminderText;
+    }
+
+    private static int CalculateBannerLogicalWidth(string text, string size)
+    {
+        int length = string.IsNullOrEmpty(text) ? 0 : text.Length;
+        switch (SettingsStore.NormalizeBannerSize(size))
+        {
+            case "Small":
+                return Math.Max(300, Math.Min(550, 100 + length * 7));
+            case "Large":
+                return Math.Max(420, Math.Min(780, 140 + length * 10));
+            default:
+                return Math.Max(350, Math.Min(650, 120 + length * 8));
+        }
+    }
+
+    private static int GetBannerLogicalHeight(string size)
+    {
+        switch (SettingsStore.NormalizeBannerSize(size))
+        {
+            case "Small": return 30;
+            case "Large": return 42;
+            default: return 34;
+        }
+    }
+
+    private static int GetBannerLogicalFontSize(string size)
+    {
+        switch (SettingsStore.NormalizeBannerSize(size))
+        {
+            case "Small": return 14;
+            case "Large": return 21;
+            default: return 17;
+        }
+    }
+
+    private static uint ParseBannerColor(string value, string fallback)
+    {
+        string color = SettingsStore.NormalizeBannerColor(value, fallback);
+        byte red = byte.Parse(color.Substring(1, 2),
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture);
+        byte green = byte.Parse(color.Substring(3, 2),
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture);
+        byte blue = byte.Parse(color.Substring(5, 2),
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture);
+        return Color(red, green, blue);
+    }
+
+    private static byte OpacityToAlpha(int percentage)
+    {
+        int normalized = SettingsStore.NormalizeBannerOpacity(percentage);
+        return (byte)Math.Round(normalized * 255.0 / 100.0);
+    }
+
+    private static void UpdateIdleDimming()
+    {
+        bool shouldDim = idleDimmingEnabled && IsUserInputIdle(
+            IdleDimAfterMilliseconds);
+        if (shouldDim == bannerIsDimmed || bannerWindow == IntPtr.Zero)
+            return;
+        SetLayeredWindowAttributes(bannerWindow, 0,
+            shouldDim ? bannerDimAlpha : bannerNormalAlpha, LayeredAlpha);
+        bannerIsDimmed = shouldDim;
+    }
+
+    private static bool IsUserInputIdle(uint thresholdMilliseconds)
+    {
+        LastInputInfo information = new LastInputInfo();
+        information.Size = (uint)Marshal.SizeOf(typeof(LastInputInfo));
+        return GetLastInputInfo(ref information) &&
+            HasIdleThresholdElapsed(GetTickCount(), information.Time,
+                thresholdMilliseconds);
+    }
+
+    private static bool HasIdleThresholdElapsed(
+        uint currentTick, uint lastInputTick, uint thresholdMilliseconds)
+    {
+        return unchecked(currentTick - lastInputTick) >= thresholdMilliseconds;
     }
 
     private static List<RdpWindowCandidate> FindInitialRdpSessionCandidates()
@@ -1286,6 +1466,18 @@ internal static class RdpSessionReminder
         return -1;
     }
 
+    private static void CleanupOneTimeProfile(string profileId, bool showError)
+    {
+        string error;
+        if (OneTimeProfileStore.TryDeleteExact(profileId, out error) ||
+            !showError)
+            return;
+
+        ShowError("The one-time connection ended, but its temporary files were " +
+            "left in place because the safety check could not verify them.\r\n\r\n" +
+            error);
+    }
+
     private static void StartSetup()
     {
         string currentDirectory = Path.GetDirectoryName(
@@ -1348,6 +1540,15 @@ internal static class RdpSessionReminder
             expected.RdpFile = Path.Combine(directory, "connection.rdp");
             expected.DisplayDevice = "\\\\.\\DISPLAY1";
             expected.ReminderText = "REMOTE SESSION - TEST LAB";
+            expected.ShortLabel = "WORK";
+            expected.BannerPreset = "Production";
+            expected.BannerBackground = "#991B1B";
+            expected.BannerForeground = "#FFFFFF";
+            expected.BannerCorner = "TopLeft";
+            expected.BannerVerticalOffset = 20;
+            expected.BannerSize = "Large";
+            expected.BannerOpacity = 85;
+            expected.IdleDimming = true;
             SettingsStore.SaveTo(path, expected);
 
             ReminderSettings actual;
@@ -1356,7 +1557,16 @@ internal static class RdpSessionReminder
                 !actual.FullScreen || actual.ShortcutName != expected.ShortcutName ||
                 actual.RdpFile != expected.RdpFile ||
                 actual.DisplayDevice != expected.DisplayDevice ||
-                actual.ReminderText != expected.ReminderText)
+                actual.ReminderText != expected.ReminderText ||
+                actual.ShortLabel != expected.ShortLabel ||
+                actual.BannerPreset != expected.BannerPreset ||
+                actual.BannerBackground != expected.BannerBackground ||
+                actual.BannerForeground != expected.BannerForeground ||
+                actual.BannerCorner != expected.BannerCorner ||
+                actual.BannerVerticalOffset != expected.BannerVerticalOffset ||
+                actual.BannerSize != expected.BannerSize ||
+                actual.BannerOpacity != expected.BannerOpacity ||
+                actual.IdleDimming != expected.IdleDimming)
                 return 11;
 
             string rdpPath = expected.RdpFile;
@@ -1391,10 +1601,63 @@ internal static class RdpSessionReminder
             ReminderSettings legacy;
             bool legacyLoaded = SettingsStore.TryLoadFrom(
                 legacyPath, rdpPath, out legacy);
-            Directory.Delete(directory, true);
             if (!legacyLoaded || legacy.ComputerName != "lab-b" ||
-                legacy.ReminderText != "REMOTE SESSION - LAB-B")
+                legacy.ReminderText != "REMOTE SESSION - LAB-B" ||
+                legacy.ShortLabel != "" ||
+                legacy.BannerPreset != "Default" ||
+                legacy.BannerBackground != "#182335" ||
+                legacy.BannerForeground != "#FFFFFF" ||
+                legacy.BannerCorner != "BottomRight" ||
+                legacy.BannerVerticalOffset != 64 ||
+                legacy.BannerSize != "Medium" ||
+                legacy.BannerOpacity != 97 || legacy.IdleDimming)
                 return 20;
+
+            string oneTimeRoot = Path.Combine(directory, "one-time");
+            string oneTimeId = Guid.NewGuid().ToString("N");
+            string oneTimeDirectory = Path.Combine(oneTimeRoot, oneTimeId);
+            Directory.CreateDirectory(oneTimeDirectory);
+            string oneTimeSettings = Path.Combine(oneTimeDirectory,
+                AppPaths.SettingsFileName);
+            string oneTimeConnection = Path.Combine(oneTimeDirectory,
+                AppPaths.ConnectionFileName);
+            string unrelatedFile = Path.Combine(oneTimeDirectory, "keep.txt");
+            File.WriteAllText(oneTimeSettings, "owned");
+            File.WriteAllText(oneTimeConnection, "owned");
+            File.WriteAllText(unrelatedFile, "unrelated");
+            string cleanupError;
+            if (!OneTimeProfileStore.TryDeleteExactFromRoot(
+                    oneTimeRoot, oneTimeId, out cleanupError) ||
+                File.Exists(oneTimeSettings) || File.Exists(oneTimeConnection) ||
+                !File.Exists(unrelatedFile) || !Directory.Exists(oneTimeDirectory))
+                return 21;
+            File.Delete(unrelatedFile);
+            if (!OneTimeProfileStore.TryDeleteExactFromRoot(
+                    oneTimeRoot, oneTimeId, out cleanupError) ||
+                Directory.Exists(oneTimeDirectory) ||
+                OneTimeProfileStore.TryDeleteExactFromRoot(
+                    oneTimeRoot, "../escape", out cleanupError))
+                return 22;
+
+            if (BuildBannerText("", "REMOTE SESSION - LAB") !=
+                    "REMOTE SESSION - LAB" ||
+                BuildBannerText("WORK", "REMOTE SESSION - LAB") !=
+                    "WORK  |  REMOTE SESSION - LAB" ||
+                CalculateBannerLogicalWidth("1234567890", "Medium") != 350 ||
+                OpacityToAlpha(97) != 247 ||
+                !HasIdleThresholdElapsed(25, UInt32.MaxValue - 50, 70) ||
+                HasIdleThresholdElapsed(25, UInt32.MaxValue - 50, 80))
+                return 23;
+
+            int[] topLeft = CalculateBannerPosition("TopLeft",
+                0, 0, 1920, 1080, 350, 34, 20, 64);
+            int[] bottomRight = CalculateBannerPosition("BottomRight",
+                0, 0, 1920, 1080, 350, 34, 20, 64);
+            if (topLeft[0] != 20 || topLeft[1] != 64 ||
+                bottomRight[0] != 1550 || bottomRight[1] != 982)
+                return 24;
+
+            Directory.Delete(directory, true);
 
             if (DecideInitialLifecycle(0, 1) != LifecycleDecision.Stop ||
                 DecideInitialLifecycle(1, 0) != LifecycleDecision.Wait ||
